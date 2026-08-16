@@ -71,6 +71,40 @@ class PlayerDataTest {
                 relativize(serverRoot, located.paths()));
     }
 
+    /**
+     * 26.2 는 {@code world/players/} 아래에 인벤토리와 stats·advancements 를 함께 둔다.
+     * 이름이 {@code playerdata} 가 아니라서, 실제로는 백업에 잘 들어가고 있는데도
+     * "미포함" 경고가 뜨고 {@code /wb status} 가 거짓말을 했다.
+     */
+    @Test
+    void recognisesThePlayersFolderLayout() throws IOException {
+        Path serverRoot = tmp.resolve("container");
+        Path world = serverRoot.resolve("world");
+        Files.createDirectories(world.resolve("dimensions/minecraft/overworld/region"));
+        Files.createDirectories(world.resolve("players/stats"));
+        Files.createDirectories(world.resolve("players/advancements"));
+
+        PlayerData.Located located = PlayerData.locate(List.of(world, serverRoot));
+
+        assertTrue(located.inventory(), "players 도 인벤토리 폴더로 인정해야 한다");
+        assertEquals(List.of("world/players"), relativize(serverRoot, located.paths()),
+                "하위의 stats·advancements 는 players 하나로 충분하다");
+    }
+
+    /** 통계만 있고 인벤토리가 없으면 "포함" 이라고 하면 안 된다. */
+    @Test
+    void statsAloneIsNotEnoughToClaimInventoryIsCovered() throws IOException {
+        Path serverRoot = tmp.resolve("container");
+        Path world = serverRoot.resolve("world");
+        Files.createDirectories(world.resolve("stats"));
+        Files.createDirectories(world.resolve("advancements"));
+
+        PlayerData.Located located = PlayerData.locate(List.of(world, serverRoot));
+
+        assertFalse(located.inventory());
+        assertEquals(List.of("world/stats", "world/advancements"), relativize(serverRoot, located.paths()));
+    }
+
     /** 못 찾으면 호출자가 경고할 수 있도록 분명히 알려야 한다. 조용히 넘어가면 안 된다. */
     @Test
     void reportsWhenInventoryFolderIsMissing() throws IOException {
@@ -112,14 +146,14 @@ class PlayerDataTest {
         Path world = serverRoot.resolve("world");
         Files.createDirectories(world.resolve("region"));
         // 월드 폴더 안도, 서버 루트도 아닌 곳
-        Files.createDirectories(serverRoot.resolve("data/players/playerdata"));
+        Files.createDirectories(serverRoot.resolve("data/saves/playerdata"));
 
         assertFalse(PlayerData.locate(List.of(world, serverRoot)).inventory(), "정해진 후보로는 못 찾는다");
 
         PlayerData.Located located = PlayerData.search(serverRoot, List.of(world, serverRoot));
 
         assertTrue(located.inventory(), "훑어서 찾아내야 한다");
-        assertEquals(List.of("data/players/playerdata"), relativize(serverRoot, located.paths()));
+        assertEquals(List.of("data/saves/playerdata"), relativize(serverRoot, located.paths()));
     }
 
     /** 플러그인 데이터 폴더 안의 동명 폴더를 서버의 플레이어 데이터로 착각하면 안 된다. */
@@ -141,7 +175,7 @@ class PlayerDataTest {
         Path serverRoot = tmp.resolve("server");
         Path world = serverRoot.resolve("world");
         Files.createDirectories(world.resolve("playerdata"));
-        Files.createDirectories(serverRoot.resolve("data/players/playerdata")); // 훑었다면 이것도 잡혔을 것
+        Files.createDirectories(serverRoot.resolve("data/saves/playerdata")); // 훑었다면 이것도 잡혔을 것
 
         PlayerData.Located located = PlayerData.search(serverRoot, List.of(world, serverRoot));
 

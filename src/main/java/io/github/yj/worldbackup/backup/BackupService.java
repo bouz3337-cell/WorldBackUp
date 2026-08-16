@@ -449,17 +449,30 @@ public final class BackupService {
         // 묻혀 다음 주기가 통째로 건너뛰어진다. 접속자가 있으면 계속 변하는 중이므로 유지한다.
         worldChanged.set(!Bukkit.getOnlinePlayers().isEmpty());
         Bukkit.savePlayers();
+
         List<WorldRef> refs = new ArrayList<>();
+        long flushStart = System.currentTimeMillis();
         for (World world : Bukkit.getWorlds()) {
             if (!settings.includesWorld(world.getName())) continue;
             frozenWorlds.putIfAbsent(world.getName(), world.isAutoSave());
             world.setAutoSave(false);
             try {
-                world.save();
+                // save(true) 여야 한다. 인자 없는 save() 는 save(false) 이고, 그건 청크 쓰기를
+                // 예약만 하고 즉시 돌아온다. 그 상태로 압축을 시작하면 서버의 I/O 스레드가
+                // 아직 쓰고 있는 region 파일을 읽게 되어, 헤더와 데이터가 어긋난 조각이
+                // 백업에 담긴다. 복원해 보면 "Corrupt regionfile header" 가 뜨고 복구되지 않은
+                // 청크는 통째로 재생성된다. 압축이 시작되기 전에 디스크 쓰기가 끝나야 한다.
+                world.save(true);
             } catch (Exception e) {
                 plugin.getLogger().log(Level.WARNING, "[백업] 월드 저장 실패: " + world.getName(), e);
             }
             refs.add(new WorldRef(world.getName(), world.getWorldFolder().toPath().toAbsolutePath().normalize()));
+        }
+
+        long flushed = System.currentTimeMillis() - flushStart;
+        if (flushed > 1000L) {
+            // 이 시간만큼 서버가 멈춘다. 관리자가 원인을 알 수 있게 남긴다.
+            plugin.getLogger().info("[백업] 청크 저장이 끝나기를 기다렸습니다: " + FileUtil.humanMillis(flushed));
         }
         return refs;
     }

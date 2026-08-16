@@ -25,11 +25,23 @@ import java.util.logging.Logger;
  */
 public final class PlayerData {
 
-    /** 서버가 플레이어별로 파일을 쌓는 폴더 이름들. */
-    private static final List<String> FOLDER_NAMES = List.of("playerdata", "stats", "advancements");
+    /**
+     * 서버가 플레이어별로 파일을 쌓는 폴더 이름들.
+     *
+     * <p>26.2 는 {@code world/players/} 아래에 인벤토리 파일과 {@code stats},
+     * {@code advancements} 를 함께 둔다. 그 전에는 {@code playerdata} 였다.
+     * 어느 쪽이든 잡히도록 둘 다 본다.</p>
+     */
+    private static final List<String> FOLDER_NAMES =
+            List.of("playerdata", "players", "stats", "advancements");
 
-    /** 인벤토리·좌표·경험치가 들어 있는 폴더. 백업에서 이것만은 빠지면 안 된다. */
-    private static final String INVENTORY_FOLDER = "playerdata";
+    /**
+     * 인벤토리·좌표·경험치가 들어 있는 폴더 이름. 백업에서 이것만은 빠지면 안 된다.
+     *
+     * <p>{@code stats} 나 {@code advancements} 만 찾은 것으로는 부족하다.
+     * 통계는 남았는데 인벤토리는 못 되돌리는 백업이 되기 때문이다.</p>
+     */
+    private static final Set<String> INVENTORY_FOLDERS = Set.of("playerdata", "players");
 
     /** 정해진 후보에서 못 찾았을 때 서버 폴더를 훑어 볼 깊이. */
     private static final int SEARCH_DEPTH = 3;
@@ -145,7 +157,8 @@ public final class PlayerData {
 
     private static Located of(List<Path> found) {
         boolean inventory = found.stream()
-                .anyMatch(path -> path.getFileName().toString().equalsIgnoreCase(INVENTORY_FOLDER));
+                .anyMatch(path -> INVENTORY_FOLDERS.contains(
+                        path.getFileName().toString().toLowerCase(Locale.ROOT)));
         return new Located(List.copyOf(found), inventory);
     }
 
