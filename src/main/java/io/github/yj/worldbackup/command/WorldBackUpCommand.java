@@ -1,0 +1,422 @@
+package io.github.yj.worldbackup.command;
+
+import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.suggestion.SuggestionProvider;
+import com.mojang.brigadier.tree.LiteralCommandNode;
+import io.github.yj.worldbackup.WorldBackUpPlugin;
+import io.github.yj.worldbackup.backup.BackupEntry;
+import io.github.yj.worldbackup.backup.BackupRepository;
+import io.github.yj.worldbackup.backup.BackupType;
+import io.github.yj.worldbackup.config.BackupSettings;
+import io.github.yj.worldbackup.util.FileUtil;
+import io.github.yj.worldbackup.util.Msg;
+import io.github.yj.worldbackup.util.Sched;
+import io.papermc.paper.command.brigadier.CommandSourceStack;
+import io.papermc.paper.command.brigadier.Commands;
+import org.bukkit.command.CommandSender;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Optional;
+
+/**
+ * Brigadier 로 등록하는 {@code /worldbackup} 명령어.
+ *
+ * <p>레거시 {@code CommandExecutor} 대신 Paper 의 명령어 API 를 쓴다. 인자 단위로 타입과 권한이
+ * 검증되고, 탭 완성이 서버가 아는 형태로 나간다. 플러그인 로딩 방식({@code plugin.yml})은
+ * 그대로 두었다 - 복원이 월드 로드 전에 실행돼야 하는 핵심 보장을 건드리지 않기 위해서다.</p>
+ */
+@SuppressWarnings("UnstableApiUsage")
+public final class WorldBackUpCommand {
+
+    private static final int PAGE_SIZE = 8;
+
+    private final WorldBackUpPlugin plugin;
+
+    /** 탭 완성용 백업 ID 캐시 (5초). 매번 디스크를 읽지 않기 위함. */
+    private List<String> cachedIds = List.of();
+    private long cachedAt;
+
+    public WorldBackUpCommand(WorldBackUpPlugin plugin) {
+        this.plugin = plugin;
+    }
+
+    // ------------------------------------------------------------------
+    // 명령어 트리
+
+    public LiteralCommandNode<CommandSourceStack> build() {
+        return Commands.literal("worldbackup")
+                .requires(source -> has(source.getSender(), "worldbackup.use"))
+                .executes(ctx -> run(ctx, this::help))
+
+                .then(Commands.literal("help").executes(ctx -> run(ctx, this::help)))
+
+                .then(Commands.literal("backup")
+                        .requires(source -> has(source.getSender(), "worldbackup.backup"))
+                        .executes(ctx -> run(ctx, sender -> backup(sender, null)))
+                        .then(Commands.argument("메모", StringArgumentType.greedyString())
+                                .executes(ctx -> run(ctx, sender ->
+                                        backup(sender, StringArgumentType.getString(ctx, "메모"))))))
+
+                .then(Commands.literal("list")
+                        .executes(ctx -> run(ctx, sender -> list(sender, 1)))
+                        .then(Commands.argument("페이지", IntegerArgumentType.integer(1))
+                                .executes(ctx -> run(ctx, sender ->
+                                        list(sender, IntegerArgumentType.getInteger(ctx, "페이지"))))))
+
+                .then(backupArgument("info", "worldbackup.use", this::info))
+                .then(Commands.literal("restore")
+                        .requires(source -> has(source.getSender(), "worldbackup.restore"))
+                        .then(Commands.argument("백업", StringArgumentType.word())
+                                .suggests(backupSuggestions())
+                                .executes(ctx -> run(ctx, sender -> restore(ctx, sender, false)))
+                                .then(Commands.literal("worlds")
+                                        .executes(ctx -> run(ctx, sender -> restore(ctx, sender, true))))))
+
+                .then(Commands.literal("confirm")
+                        .requires(source -> has(source.getSender(), "worldbackup.restore"))
+                        .executes(ctx -> run(ctx, sender -> plugin.restoreService().confirm(sender))))
+                .then(Commands.literal("cancel")
+                        .requires(source -> has(source.getSender(), "worldbackup.restore"))
+                        .executes(ctx -> run(ctx, sender -> plugin.restoreService().cancel(sender))))
+
+                .then(Commands.literal("delete")
+                        .requires(source -> has(source.getSender(), "worldbackup.delete"))
+                        .then(Commands.argument("백업", StringArgumentType.word())
+                                .suggests(backupSuggestions())
+                                .executes(ctx -> run(ctx, sender -> delete(ctx, sender, false)))
+                                .then(Commands.literal("cascade")
+                                        .executes(ctx -> run(ctx, sender -> delete(ctx, sender, true))))))
+
+                .then(backupArgument("lock", "worldbackup.delete", (sender, entry) -> setLocked(sender, entry, true)))
+                .then(backupArgument("unlock", "worldbackup.delete", (sender, entry) -> setLocked(sender, entry, false)))
+
+                .then(Commands.literal("prune")
+                        .requires(source -> has(source.getSender(), "worldbackup.delete"))
+                        .executes(ctx -> run(ctx, this::prune)))
+                .then(Commands.literal("status").executes(ctx -> run(ctx, this::status)))
+                .then(Commands.literal("reload")
+                        .requires(source -> has(source.getSender(), "worldbackup.reload"))
+                        .executes(ctx -> run(ctx, this::reload)))
+                .build();
+    }
+
+    /** "<이름> <백업>" 형태의 하위 명령을 만든다. */
+    private LiteralArgumentBuilder<CommandSourceStack> backupArgument(String name,
+                                                                     String permission,
+                                                                     BackupAction action) {
+        return Commands.literal(name)
+                .requires(source -> has(source.getSender(), permission))
+                .then(Commands.argument("백업", StringArgumentType.word())
+                        .suggests(backupSuggestions())
+                        .executes(ctx -> run(ctx, sender ->
+                                resolve(sender, StringArgumentType.getString(ctx, "백업"))
+                                        .ifPresent(entry -> action.accept(sender, entry)))));
+    }
+
+    @FunctionalInterface
+    private interface BackupAction {
+        void accept(CommandSender sender, BackupEntry entry);
+    }
+
+    private SuggestionProvider<CommandSourceStack> backupSuggestions() {
+        return (ctx, builder) -> {
+            String prefix = builder.getRemainingLowerCase();
+            if ("latest".startsWith(prefix)) builder.suggest("latest");
+            for (String id : backupIds()) {
+                if (id.toLowerCase(java.util.Locale.ROOT).startsWith(prefix)) builder.suggest(id);
+            }
+            return builder.buildFuture();
+        };
+    }
+
+    /** 명령 본문을 감싸 예외가 서버 콘솔로 새어 나가지 않게 한다. */
+    private int run(CommandContext<CommandSourceStack> ctx, java.util.function.Consumer<CommandSender> body) {
+        CommandSender sender = ctx.getSource().getSender();
+        try {
+            body.accept(sender);
+        } catch (Exception e) {
+            Msg.send(sender, "<red>명령 처리 중 오류가 발생했습니다: "
+                    + Msg.sanitize(String.valueOf(e.getMessage())) + "</red>");
+            plugin.getLogger().log(java.util.logging.Level.WARNING, "명령 처리 실패", e);
+        }
+        return com.mojang.brigadier.Command.SINGLE_SUCCESS;
+    }
+
+    private boolean has(CommandSender sender, String permission) {
+        return sender.hasPermission(permission) || sender.hasPermission("worldbackup.admin");
+    }
+
+    // ------------------------------------------------------------------
+    // 동작
+
+    private void help(CommandSender sender) {
+        Msg.sendRaw(sender, "<dark_gray>─────────</dark_gray> <gradient:#5eead4:#38bdf8><bold>WorldBackUp</bold></gradient> <dark_gray>─────────</dark_gray>");
+        line(sender, "/wb backup [메모]", "지금 즉시 백업합니다");
+        line(sender, "/wb list [페이지]", "백업 목록을 봅니다");
+        line(sender, "/wb info [ID|번호]", "백업 상세 정보를 봅니다");
+        line(sender, "/wb restore [ID|번호] (worlds)", "그 시점으로 되돌립니다");
+        line(sender, "/wb confirm", "복원을 확정합니다");
+        line(sender, "/wb cancel", "복원 요청을 취소합니다");
+        line(sender, "/wb delete [ID|번호] (cascade)", "백업을 삭제합니다");
+        line(sender, "/wb lock, /wb unlock [ID|번호]", "자동 삭제로부터 보호/해제합니다");
+        line(sender, "/wb prune", "보관 정책을 지금 적용합니다");
+        line(sender, "/wb status", "현재 상태를 봅니다");
+        line(sender, "/wb reload", "설정을 다시 불러옵니다");
+        Msg.sendRaw(sender, "<dark_gray>번호는 <white>/wb list</white> 의 <white>#숫자</white>, <white>latest</white> 도 사용할 수 있습니다.</dark_gray>");
+    }
+
+    private void line(CommandSender sender, String usage, String description) {
+        Msg.sendRaw(sender, " <aqua>" + usage + "</aqua> <dark_gray>-</dark_gray> <gray>" + description + "</gray>");
+    }
+
+    private void backup(CommandSender sender, String rawMemo) {
+        if (plugin.backupService().isRunning()) {
+            Msg.send(sender, "<red>이미 백업이 진행 중입니다. <gray>(" + plugin.backupService().progressText() + ")</gray></red>");
+            return;
+        }
+        String memo = rawMemo == null || rawMemo.isBlank() ? null : Msg.sanitize(rawMemo);
+        Msg.send(sender, "<gray>백업을 시작합니다...</gray>");
+        plugin.backupService().startAsync(BackupType.MANUAL, memo, sender)
+                .whenComplete((entry, error) -> Sched.syncQuietly(plugin, () -> {
+                    if (error != null) {
+                        Msg.send(sender, "<red>백업 실패: " + Msg.sanitize(String.valueOf(error.getMessage())) + "</red>");
+                        return;
+                    }
+                    Msg.send(sender, "<green>백업 완료</green> <white>" + entry.id() + "</white> <gray>("
+                            + FileUtil.humanBytes(entry.archiveBytes()) + ", " + entry.fileCount() + "개 파일)</gray>");
+                }));
+    }
+
+    private void list(CommandSender sender, int requestedPage) {
+        List<BackupEntry> entries = plugin.repository().list();
+        if (entries.isEmpty()) {
+            Msg.send(sender, "<gray>아직 백업이 없습니다. <white>/wb backup</white> 으로 첫 백업을 만들어 보세요.</gray>");
+            return;
+        }
+
+        int pages = (entries.size() + PAGE_SIZE - 1) / PAGE_SIZE;
+        int page = Math.min(Math.max(1, requestedPage), pages);
+        int from = (page - 1) * PAGE_SIZE;
+        int to = Math.min(entries.size(), from + PAGE_SIZE);
+
+        long totalBytes = entries.stream().mapToLong(BackupEntry::archiveBytes).sum();
+        Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>백업 목록</aqua> <gray>(" + entries.size() + "개, "
+                + FileUtil.humanBytes(totalBytes) + ")</gray> <dark_gray>[" + page + "/" + pages + "]</dark_gray>");
+
+        for (int i = from; i < to; i++) {
+            BackupEntry entry = entries.get(i);
+            String age = FileUtil.humanDuration(Duration.between(entry.createdAt(), Instant.now()));
+            String memo = entry.hasLabel() ? " <dark_gray>| <italic>" + Msg.sanitize(entry.label()) + "</italic></dark_gray>" : "";
+            String tags = entry.locked() ? " <gold>[보호]</gold>" : "";
+            if (entry.isDifferential()) tags += " <yellow>[차등]</yellow>";
+            if (!entry.complete()) tags += " <red>[손상]</red>";
+            Msg.sendRaw(sender,
+                    "<dark_gray>#" + (i + 1) + "</dark_gray> "
+                            + "<hover:show_text:'<gray>클릭하면 상세 정보</gray>'><click:run_command:'/wb info " + entry.id() + "'>"
+                            + "<white>" + entry.displayTime() + "</white></click></hover> "
+                            + "<dark_gray>|</dark_gray> " + entry.type().color() + entry.type().korean() + "</" + colorTag(entry.type().color()) + "> "
+                            + "<dark_gray>|</dark_gray> <aqua>" + FileUtil.humanBytes(entry.archiveBytes()) + "</aqua> "
+                            + "<dark_gray>|</dark_gray> <gray>" + age + " 전</gray>" + tags + memo);
+        }
+        if (page < pages) {
+            Msg.sendRaw(sender, "<click:run_command:'/wb list " + (page + 1) + "'><gray>» 다음 페이지</gray></click>");
+        }
+    }
+
+    private String colorTag(String openTag) {
+        return openTag.replace("<", "").replace(">", "");
+    }
+
+    private void info(CommandSender sender, BackupEntry entry) {
+        Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>백업 정보</aqua> <dark_gray>─────</dark_gray>");
+        Msg.sendRaw(sender, " <gray>ID       :</gray> <white>" + entry.id() + "</white>");
+        if (!entry.complete()) {
+            Msg.sendRaw(sender, " <red><bold>복원할 수 없는 백업입니다.</bold></red>");
+            Msg.sendRaw(sender, entry.isDifferential()
+                    ? " <gray>차등 백업인데 기준이 되는 전체 백업이 사라졌습니다.</gray>"
+                    : " <gray>압축이 끝나기 전에 서버가 종료된 것으로 보입니다.</gray>");
+        }
+        Msg.sendRaw(sender, " <gray>시각     :</gray> <white>" + entry.displayTime() + "</white> <dark_gray>("
+                + FileUtil.humanDuration(Duration.between(entry.createdAt(), Instant.now())) + " 전)</dark_gray>");
+        Msg.sendRaw(sender, " <gray>종류     :</gray> " + entry.type().color() + entry.type().korean() + "</"
+                + colorTag(entry.type().color()) + ">" + (entry.locked() ? " <gold>[보호됨]</gold>" : ""));
+        Msg.sendRaw(sender, " <gray>방식     :</gray> " + (entry.isDifferential()
+                ? "<yellow>차등</yellow> <dark_gray>(기준 " + entry.baseId() + ")</dark_gray>"
+                : "<white>전체</white>"));
+        if (entry.hasLabel()) {
+            Msg.sendRaw(sender, " <gray>메모     :</gray> <white>" + Msg.sanitize(entry.label()) + "</white>");
+        }
+        Msg.sendRaw(sender, " <gray>파일 크기:</gray> <aqua>" + FileUtil.humanBytes(entry.archiveBytes())
+                + "</aqua> <dark_gray>(스냅샷 원본 " + FileUtil.humanBytes(entry.originalBytes()) + ")</dark_gray>");
+        Msg.sendRaw(sender, " <gray>파일 수  :</gray> <white>" + entry.fileCount() + "</white>");
+        Msg.sendRaw(sender, " <gray>월드     :</gray> <white>"
+                + (entry.worlds().isEmpty() ? "-" : String.join(", ", entry.worlds())) + "</white>");
+        Msg.sendRaw(sender, " <gray>포함 경로:</gray> <white>"
+                + (entry.roots().isEmpty() ? "-" : String.join(", ", entry.roots())) + "</white>");
+        Msg.sendRaw(sender, " <gray>서버     :</gray> <white>" + entry.serverVersion() + "</white>");
+        if (entry.complete() && sender.hasPermission("worldbackup.restore")) {
+            Msg.sendRaw(sender, " <click:suggest_command:'/wb restore " + entry.id()
+                    + "'><green>[이 시점으로 복원하기]</green></click>");
+        }
+    }
+
+    private void restore(CommandContext<CommandSourceStack> ctx, CommandSender sender, boolean worldsOnly) {
+        resolve(sender, StringArgumentType.getString(ctx, "백업"))
+                .ifPresent(entry -> plugin.restoreService().request(sender, entry, worldsOnly));
+    }
+
+    private void delete(CommandContext<CommandSourceStack> ctx, CommandSender sender, boolean cascade) {
+        Optional<BackupEntry> found = resolve(sender, StringArgumentType.getString(ctx, "백업"));
+        if (found.isEmpty()) return;
+        BackupEntry entry = found.get();
+
+        if (entry.locked()) {
+            Msg.send(sender, "<red>보호된 백업입니다. <white>/wb unlock " + entry.id() + "</white> 후 삭제하세요.</red>");
+            return;
+        }
+
+        List<BackupEntry> all = plugin.repository().list();
+        List<BackupEntry> dependents = plugin.repository().dependents(all, entry.id());
+
+        // 차등 백업은 기준 백업 없이는 복원할 수 없다. 즉 기준을 지우는 것은 딸린 차등본을
+        // 지우는 것과 같으므로, 보호된 차등본이 하나라도 있으면 cascade 여부와 무관하게 거부한다.
+        // (이 검사가 없으면 /wb lock 으로 잠근 백업이 cascade 한 번에 사라진다)
+        List<BackupEntry> lockedDependents = dependents.stream().filter(BackupEntry::locked).toList();
+        if (!lockedDependents.isEmpty()) {
+            Msg.send(sender, "<red>보호된 차등 백업 " + lockedDependents.size()
+                    + "개가 이 백업을 기준으로 삼고 있어 삭제할 수 없습니다.</red>");
+            for (BackupEntry dependent : lockedDependents) {
+                Msg.send(sender, "<gray> - <white>" + dependent.id() + "</white> <gold>[보호]</gold></gray>");
+            }
+            Msg.send(sender, "<gray>먼저 <white>/wb unlock [ID]</white> 로 보호를 해제하세요.</gray>");
+            return;
+        }
+
+        if (!dependents.isEmpty() && !cascade) {
+            Msg.send(sender, "<red>이 백업을 기준으로 삼는 차등 백업이 " + dependents.size() + "개 있습니다.</red>");
+            Msg.send(sender, "<gray>지우면 그 백업들도 복원할 수 없게 됩니다. 함께 지우려면 "
+                    + "<white>/wb delete " + entry.id() + " cascade</white></gray>");
+            return;
+        }
+
+        int deleted = 0;
+        if (cascade) {
+            for (BackupEntry dependent : dependents) {
+                if (plugin.repository().delete(dependent)) deleted++;
+            }
+        }
+        if (plugin.repository().delete(entry)) {
+            deleted++;
+            Msg.send(sender, "<green>백업 " + deleted + "개를 삭제했습니다: <white>" + entry.id() + "</white></green>");
+        } else {
+            Msg.send(sender, "<red>백업 삭제에 실패했습니다. 콘솔 로그를 확인하세요.</red>");
+        }
+    }
+
+    private void setLocked(CommandSender sender, BackupEntry entry, boolean locked) {
+        if (!plugin.repository().setLocked(entry, locked)) {
+            Msg.send(sender, "<red>보호 상태를 저장하지 못했습니다. 콘솔 로그를 확인하세요.</red>");
+            return;
+        }
+        Msg.send(sender, locked
+                ? "<green>이제 이 백업은 자동으로 삭제되지 않습니다: <white>" + entry.id() + "</white></green>"
+                : "<gray>보호를 해제했습니다: <white>" + entry.id() + "</white></gray>");
+    }
+
+    private void prune(CommandSender sender) {
+        if (plugin.backupService().isRunning()) {
+            Msg.send(sender, "<red>백업이 진행 중입니다. 완료 후 다시 시도하세요.</red>");
+            return;
+        }
+        Msg.send(sender, "<gray>보관 정책을 적용하는 중입니다...</gray>");
+        BackupSettings settings = plugin.settings();
+        Sched.async(plugin, () -> {
+            BackupRepository.PruneResult result = plugin.repository().prune(settings);
+            Sched.syncQuietly(plugin, () -> {
+                if (result.deleted() == 0) {
+                    Msg.send(sender, "<gray>삭제할 백업이 없습니다.</gray>");
+                } else {
+                    Msg.send(sender, "<green>백업 " + result.deleted() + "개를 삭제했습니다.</green> <gray>("
+                            + FileUtil.humanBytes(result.freedBytes()) + " 확보)</gray>");
+                }
+            });
+        });
+    }
+
+    private void status(CommandSender sender) {
+        BackupSettings settings = plugin.settings();
+        List<BackupEntry> entries = plugin.repository().list();
+        long totalBytes = entries.stream().mapToLong(BackupEntry::archiveBytes).sum();
+
+        Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>WorldBackUp 상태</aqua> <dark_gray>─────</dark_gray>");
+        Msg.sendRaw(sender, " <gray>자동 백업:</gray> " + (settings.enabled()
+                ? "<green>켜짐</green> <dark_gray>(" + settings.intervalMinutes() + "분 주기)</dark_gray>"
+                : "<red>꺼짐</red>"));
+        Msg.sendRaw(sender, " <gray>백업 방식:</gray> " + (settings.differential()
+                ? "<yellow>차등</yellow> <dark_gray>(전체 백업 " + settings.fullEvery() + "회마다 재생성)</dark_gray>"
+                : "<white>전체</white>"));
+
+        if (plugin.backupService().isRunning()) {
+            String progress = plugin.backupService().progressText();
+            Msg.sendRaw(sender, " <gray>진행 중  :</gray> <yellow>" + (progress.isBlank() ? "준비 중" : progress) + "</yellow>");
+        } else if (settings.enabled()) {
+            long remain = plugin.backupService().nextRunAt() - System.currentTimeMillis();
+            Msg.sendRaw(sender, " <gray>다음 백업:</gray> <white>"
+                    + (remain > 0 ? FileUtil.humanDuration(Duration.ofMillis(remain)) + " 후" : "곧") + "</white>");
+        }
+
+        plugin.backupService().lastBackup().ifPresentOrElse(
+                entry -> Msg.sendRaw(sender, " <gray>최근 백업:</gray> <white>" + entry.displayTime() + "</white> <dark_gray>("
+                        + FileUtil.humanBytes(entry.archiveBytes()) + ")</dark_gray>"),
+                () -> {
+                    if (!entries.isEmpty()) {
+                        BackupEntry entry = entries.get(0);
+                        Msg.sendRaw(sender, " <gray>최근 백업:</gray> <white>" + entry.displayTime() + "</white> <dark_gray>("
+                                + FileUtil.humanBytes(entry.archiveBytes()) + ")</dark_gray>");
+                    }
+                });
+        plugin.backupService().lastError().ifPresent(error ->
+                Msg.sendRaw(sender, " <gray>최근 오류:</gray> <red>" + Msg.sanitize(error) + "</red>"));
+
+        Msg.sendRaw(sender, " <gray>보관 중  :</gray> <white>" + entries.size() + "개</white> <dark_gray>("
+                + FileUtil.humanBytes(totalBytes) + ")</dark_gray>");
+        Msg.sendRaw(sender, " <gray>저장 위치:</gray> <white>" + settings.backupDir() + "</white>");
+        Msg.sendRaw(sender, " <gray>디스크   :</gray> <white>"
+                + FileUtil.humanBytes(FileUtil.usableSpace(settings.backupDir())) + " 남음</white>");
+        Msg.sendRaw(sender, " <gray>보관 정책:</gray> <white>최대 " + settings.maxBackups() + "개 / "
+                + settings.maxAgeDays() + "일</white>");
+    }
+
+    private void reload(CommandSender sender) {
+        try {
+            plugin.reloadPlugin();
+            Msg.send(sender, "<green>설정을 다시 불러왔습니다.</green>");
+        } catch (Exception e) {
+            Msg.send(sender, "<red>설정을 불러오지 못했습니다: " + Msg.sanitize(String.valueOf(e.getMessage())) + "</red>");
+        }
+    }
+
+    // ------------------------------------------------------------------
+
+    private Optional<BackupEntry> resolve(CommandSender sender, String token) {
+        Optional<BackupEntry> found = plugin.repository().resolve(token);
+        if (found.isEmpty()) {
+            Msg.send(sender, "<red>백업을 찾을 수 없습니다: <white>" + Msg.sanitize(token) + "</white></red>");
+        }
+        return found;
+    }
+
+    private List<String> backupIds() {
+        long now = System.currentTimeMillis();
+        if (now - cachedAt > 5_000L) {
+            cachedIds = plugin.repository().list().stream().map(BackupEntry::id).toList();
+            cachedAt = now;
+        }
+        return cachedIds;
+    }
+}

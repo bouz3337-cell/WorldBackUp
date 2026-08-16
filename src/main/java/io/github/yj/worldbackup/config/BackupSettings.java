@@ -1,0 +1,198 @@
+package io.github.yj.worldbackup.config;
+
+import io.github.yj.worldbackup.util.FileUtil;
+import io.github.yj.worldbackup.util.GlobMatcher;
+import org.bukkit.configuration.file.FileConfiguration;
+
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+
+/** config.yml 을 읽어들인 불변 설정 스냅샷. */
+public final class BackupSettings {
+
+    // backup
+    private final boolean enabled;
+    private final boolean differential;
+    private final int fullEvery;
+    private final int intervalMinutes;
+    private final int initialDelayMinutes;
+    private final boolean onStartup;
+    private final boolean onShutdown;
+    private final boolean skipIfNoPlayers;
+    private final int compressionLevel;
+    private final Path backupDir;
+    private final boolean broadcast;
+    private final String broadcastPermission;
+
+    // targets
+    private final List<String> worlds;
+    private final List<String> serverFiles;
+    private final List<String> extraPaths;
+    private final List<String> excludePatterns;
+    private final GlobMatcher exclude;
+
+    // retention
+    private final int maxBackups;
+    private final int maxAgeDays;
+    private final int keepDaily;
+    private final boolean protectManual;
+    private final int maxProtected;
+    private final long minFreeDiskBytes;
+
+    // restore
+    private final int countdownSeconds;
+    private final boolean safetyBackup;
+    private final boolean keepReplacedFiles;
+    private final int keepReplacedMax;
+    private final boolean verifyArchive;
+    private final int confirmTimeoutSeconds;
+    private final List<String> preservePatterns;
+    private final GlobMatcher preserve;
+
+    private final Path serverRoot;
+
+    private BackupSettings(FileConfiguration cfg, Path dataFolder, Path serverRoot) {
+        this.serverRoot = serverRoot;
+
+        this.enabled = cfg.getBoolean("backup.enabled", true);
+        String mode = String.valueOf(cfg.getString("backup.mode", "full")).trim().toLowerCase(Locale.ROOT);
+        this.differential = mode.startsWith("diff") || mode.startsWith("차등");
+        this.fullEvery = Math.max(0, cfg.getInt("backup.full-every", 24));
+        this.intervalMinutes = Math.max(1, cfg.getInt("backup.interval-minutes", 30));
+        this.initialDelayMinutes = Math.max(0, cfg.getInt("backup.initial-delay-minutes", 10));
+        this.onStartup = cfg.getBoolean("backup.on-startup", false);
+        this.onShutdown = cfg.getBoolean("backup.on-shutdown", false);
+        this.skipIfNoPlayers = cfg.getBoolean("backup.skip-if-no-players", true);
+        this.compressionLevel = Math.min(9, Math.max(0, cfg.getInt("backup.compression-level", 4)));
+        this.broadcast = cfg.getBoolean("backup.broadcast", true);
+        this.broadcastPermission = cfg.getBoolean("backup.broadcast-permission-only", true)
+                ? "worldbackup.notify" : null;
+
+        String dir = cfg.getString("backup.directory", "backups");
+        Path configured = Paths.get(dir == null || dir.isBlank() ? "backups" : dir);
+        this.backupDir = (configured.isAbsolute() ? configured : dataFolder.resolve(configured))
+                .toAbsolutePath().normalize();
+
+        this.worlds = lower(cfg.getStringList("targets.worlds"));
+        this.serverFiles = cfg.getStringList("targets.server-files");
+        this.extraPaths = cfg.getStringList("targets.extra-paths");
+
+        List<String> excludes = new ArrayList<>(cfg.getStringList("targets.exclude"));
+        // 플러그인 자기 폴더(backups/, replaced/, 예약 파일 등)와 백업 폴더는 절대 백업하지 않는다.
+        // replaced/ 에는 복원 때 밀어낸 옛 월드가 통째로 들어 있어서, 빠뜨리면 백업이 눈덩이처럼 불어난다.
+        addSelfExclusion(excludes, serverRoot, dataFolder);
+        addSelfExclusion(excludes, serverRoot, backupDir);
+        this.excludePatterns = List.copyOf(excludes);
+        this.exclude = new GlobMatcher(excludes);
+
+        this.maxBackups = Math.max(0, cfg.getInt("retention.max-backups", 48));
+        this.maxAgeDays = Math.max(0, cfg.getInt("retention.max-age-days", 14));
+        this.keepDaily = Math.max(0, cfg.getInt("retention.keep-daily", 7));
+        this.protectManual = cfg.getBoolean("retention.protect-manual", true);
+        this.maxProtected = Math.max(0, cfg.getInt("retention.max-protected", 10));
+        this.minFreeDiskBytes = Math.max(0L, cfg.getLong("retention.min-free-disk-gb", 5)) * 1024L * 1024L * 1024L;
+
+        this.countdownSeconds = Math.max(0, cfg.getInt("restore.countdown-seconds", 15));
+        this.safetyBackup = cfg.getBoolean("restore.create-safety-backup", true);
+        this.keepReplacedFiles = cfg.getBoolean("restore.keep-replaced-files", true);
+        this.keepReplacedMax = Math.max(0, cfg.getInt("restore.keep-replaced-max", 3));
+        this.verifyArchive = cfg.getBoolean("restore.verify-archive", true);
+        this.confirmTimeoutSeconds = Math.max(10, cfg.getInt("restore.confirm-timeout-seconds", 60));
+        List<String> preserveList = cfg.getStringList("restore.preserve");
+        if (preserveList.isEmpty()) preserveList = List.of("**/session.lock");
+        this.preservePatterns = List.copyOf(preserveList);
+        this.preserve = new GlobMatcher(this.preservePatterns);
+    }
+
+    public static BackupSettings load(FileConfiguration cfg, Path dataFolder, Path serverRoot) {
+        return new BackupSettings(cfg, dataFolder, serverRoot);
+    }
+
+    /** 서버 루트 안에 있는 플러그인 소유 폴더를 백업 대상에서 빼 준다. */
+    private static void addSelfExclusion(List<String> excludes, Path serverRoot, Path own) {
+        String relative = FileUtil.relativize(serverRoot, own);
+        if (relative == null) return; // 서버 폴더 밖이면 애초에 백업되지 않는다
+        if (!excludes.contains(relative)) excludes.add(relative);
+        String subtree = relative + "/**";
+        if (!excludes.contains(subtree)) excludes.add(subtree);
+    }
+
+    private static List<String> lower(List<String> values) {
+        List<String> out = new ArrayList<>(values.size());
+        for (String value : values) out.add(value.toLowerCase(Locale.ROOT));
+        return out;
+    }
+
+    /** 해당 월드를 백업 대상에 포함할지 여부. */
+    public boolean includesWorld(String name) {
+        if (worlds.isEmpty() || worlds.contains("*")) return true;
+        return worlds.contains(name.toLowerCase(Locale.ROOT));
+    }
+
+    public boolean enabled() { return enabled; }
+
+    /** 차등 백업 모드인지. 전체 백업 하나를 기준으로 이후에는 바뀐 파일만 저장한다. */
+    public boolean differential() { return differential; }
+
+    /** 차등 백업을 이 개수만큼 만들면 전체 백업을 다시 만든다. (0 = 자동 재생성 안 함) */
+    public int fullEvery() { return fullEvery; }
+
+    public int intervalMinutes() { return intervalMinutes; }
+
+    public int initialDelayMinutes() { return initialDelayMinutes; }
+
+    public boolean onStartup() { return onStartup; }
+
+    public boolean onShutdown() { return onShutdown; }
+
+    public boolean skipIfNoPlayers() { return skipIfNoPlayers; }
+
+    public int compressionLevel() { return compressionLevel; }
+
+    public Path backupDir() { return backupDir; }
+
+    public boolean broadcast() { return broadcast; }
+
+    public String broadcastPermission() { return broadcastPermission; }
+
+    public List<String> serverFiles() { return serverFiles; }
+
+    public List<String> extraPaths() { return extraPaths; }
+
+    public List<String> excludePatterns() { return excludePatterns; }
+
+    public GlobMatcher exclude() { return exclude; }
+
+    public int maxBackups() { return maxBackups; }
+
+    public int maxAgeDays() { return maxAgeDays; }
+
+    public int keepDaily() { return keepDaily; }
+
+    public boolean protectManual() { return protectManual; }
+
+    public int maxProtected() { return maxProtected; }
+
+    public long minFreeDiskBytes() { return minFreeDiskBytes; }
+
+    public int countdownSeconds() { return countdownSeconds; }
+
+    public boolean safetyBackup() { return safetyBackup; }
+
+    public boolean keepReplacedFiles() { return keepReplacedFiles; }
+
+    public int keepReplacedMax() { return keepReplacedMax; }
+
+    public boolean verifyArchive() { return verifyArchive; }
+
+    public int confirmTimeoutSeconds() { return confirmTimeoutSeconds; }
+
+    public List<String> preservePatterns() { return preservePatterns; }
+
+    public GlobMatcher preserve() { return preserve; }
+
+    public Path serverRoot() { return serverRoot; }
+}

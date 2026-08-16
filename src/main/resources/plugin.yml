@@ -1,0 +1,40 @@
+name: WorldBackUp
+version: '${version}'
+main: io.github.yj.worldbackup.WorldBackUpPlugin
+api-version: '26.2'
+description: 월드와 플레이어 데이터를 주기적으로 백업하고, 원하는 시점으로 되돌리는 플러그인
+authors: [yj]
+website: https://github.com/bouz3337-cell/WorldBackUp
+
+# 명령어는 Brigadier 로 등록한다. (WorldBackUpPlugin#registerCommands)
+# 여기에 commands: 블록을 두면 이름이 겹쳐 등록이 어긋나므로 두지 않는다.
+
+permissions:
+  worldbackup.use:
+    description: 백업 목록/정보 조회
+    default: op
+  worldbackup.backup:
+    description: 수동 백업 실행
+    default: op
+  worldbackup.restore:
+    description: 백업 복원(롤백) 실행
+    default: op
+  worldbackup.delete:
+    description: 백업 삭제/보호 설정
+    default: op
+  worldbackup.reload:
+    description: 설정 다시 불러오기
+    default: op
+  worldbackup.notify:
+    description: 백업 진행 알림 수신
+    default: op
+  worldbackup.admin:
+    description: 모든 WorldBackUp 권한
+    default: op
+    children:
+      worldbackup.use: true
+      worldbackup.backup: true
+      worldbackup.restore: true
+      worldbackup.delete: true
+      worldbackup.reload: true
+      worldbackup.notify: true
