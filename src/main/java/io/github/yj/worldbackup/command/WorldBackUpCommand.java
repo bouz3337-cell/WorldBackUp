@@ -603,10 +603,25 @@ public final class WorldBackUpCommand {
             int planned = settings.tiers().stream().mapToInt(RetentionTiers.Tier::keep).sum();
             Msg.sendRaw(sender, " <gray>보관 정책:</gray> <white>계단식 " + settings.tiers().size()
                     + "단계</white> <dark_gray>(최대 " + planned + "개)</dark_gray>");
+
+            // 각 계단은 앞 계단이 끝난 지점부터 이어서 과거로 간다. 그 누적 범위를 직접 보여 준다.
+            // 설정만 보고는 "6시간마다 1개" 가 실제로 어느 시간대를 덮는지 알기 어렵다.
+            Duration covered = Duration.ZERO;
             for (RetentionTiers.Tier tier : settings.tiers()) {
-                String every = tier.every().isZero() ? "최신" : FileUtil.humanDuration(tier.every()) + "마다";
-                Msg.sendRaw(sender, "   <dark_gray>· " + every + " × " + tier.keep() + "개</dark_gray>");
+                Duration span = tier.every().isZero()
+                        // 간격 0 은 개수 기준이라 백업 주기로 어림잡는다.
+                        ? Duration.ofMinutes((long) settings.intervalMinutes() * tier.keep())
+                        : tier.every().multipliedBy(tier.keep());
+                covered = covered.plus(span);
+
+                String every = tier.every().isZero()
+                        ? "최신 " + tier.keep() + "개"
+                        : FileUtil.humanDuration(tier.every()) + "마다 × " + tier.keep() + "개";
+                Msg.sendRaw(sender, "   <dark_gray>· " + every
+                        + " <white>→ " + FileUtil.humanDuration(covered) + "까지</white></dark_gray>");
             }
+            Msg.sendRaw(sender, "   <dark_gray>(간격 0 구간은 백업 주기 "
+                    + settings.intervalMinutes() + "분으로 어림잡은 값입니다)</dark_gray>");
         }
         if (settings.minBackups() > 0) {
             Msg.sendRaw(sender, " <gray>최소 보관:</gray> <white>" + settings.minBackups() + "개</white>");
