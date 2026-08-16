@@ -3,13 +3,16 @@ package io.github.yj.worldbackup;
 import io.github.yj.worldbackup.backup.BackupRepository;
 import io.github.yj.worldbackup.backup.BackupService;
 import io.github.yj.worldbackup.backup.BackupType;
+import io.github.yj.worldbackup.backup.PlayerData;
 import io.github.yj.worldbackup.command.WorldBackUpCommand;
 import io.github.yj.worldbackup.config.BackupSettings;
 import io.github.yj.worldbackup.listener.ActivityListener;
 import io.github.yj.worldbackup.restore.PendingRestore;
 import io.github.yj.worldbackup.restore.RestoreApplier;
 import io.github.yj.worldbackup.restore.RestoreService;
+import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.Sched;
+import org.bukkit.World;
 import io.papermc.paper.plugin.lifecycle.event.LifecycleEventManager;
 import io.papermc.paper.plugin.lifecycle.event.types.LifecycleEvents;
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
@@ -22,6 +25,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.logging.Level;
 
@@ -70,6 +74,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         Bukkit.getPluginManager().registerEvents(new ActivityListener(this), this);
 
         reportLastRestore();
+        reportPlayerData();
         runStartupHousekeeping();
 
         // 안전망: 백업이 돌지 않는데 자동 저장이 꺼진 월드가 남아 있으면 1분마다 되돌린다.
@@ -283,6 +288,43 @@ public final class WorldBackUpPlugin extends JavaPlugin {
             }
         } catch (Exception ignored) {
         }
+    }
+
+    /**
+     * 백업 대상 월드들과 서버 루트에서 플레이어 데이터를 찾는다.
+     *
+     * <p>{@code onEnable} 시점에는 월드가 이미 로드되어 있어 실제 폴더 위치를 알 수 있다.</p>
+     */
+    public PlayerData.Located locatePlayerData() {
+        BackupSettings snapshot = settings;
+        List<Path> bases = new ArrayList<>();
+        if (snapshot != null) {
+            for (World world : Bukkit.getWorlds()) {
+                if (!snapshot.includesWorld(world.getName())) continue;
+                bases.add(world.getWorldFolder().toPath().toAbsolutePath().normalize());
+            }
+            bases.add(snapshot.serverRoot());
+        }
+        return PlayerData.locate(bases);
+    }
+
+    /**
+     * 인벤토리가 백업에 들어가는지 시작할 때 한 번 확인해 알린다.
+     *
+     * <p>첫 백업을 기다렸다가 알게 되거나, 최악의 경우 롤백할 때 알게 되는 것을 막는다.</p>
+     */
+    private void reportPlayerData() {
+        PlayerData.Located located = locatePlayerData();
+        if (!located.inventory()) {
+            PlayerData.warnMissing(getLogger());
+            return;
+        }
+        List<String> shown = new ArrayList<>();
+        for (Path path : located.paths()) {
+            String relative = FileUtil.relativize(settings.serverRoot(), path);
+            shown.add(relative == null ? path.toString() : relative);
+        }
+        getLogger().info("[백업] 플레이어 데이터 포함: " + String.join(", ", shown));
     }
 
     /** 이 시각 이후에 만들어진 백업이 있는지. */

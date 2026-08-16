@@ -371,6 +371,12 @@ public final class WorldBackUpCommand {
                 ? "<yellow>차등</yellow> <dark_gray>(전체 백업 " + settings.fullEvery() + "회마다 재생성)</dark_gray>"
                 : "<white>전체</white>"));
 
+        // 인벤토리가 빠진 채 백업이 "성공" 하는 상황을 눈에 띄게 만든다.
+        boolean inventory = plugin.locatePlayerData().inventory();
+        Msg.sendRaw(sender, " <gray>플레이어  :</gray> " + (inventory
+                ? "<green>포함</green> <dark_gray>(인벤토리·경험치·통계)</dark_gray>"
+                : "<red><bold>미포함 - 인벤토리를 되돌릴 수 없습니다</bold></red>"));
+
         if (plugin.backupService().isRunning()) {
             String progress = plugin.backupService().progressText();
             Msg.sendRaw(sender, " <gray>진행 중  :</gray> <yellow>" + (progress.isBlank() ? "준비 중" : progress) + "</yellow>");

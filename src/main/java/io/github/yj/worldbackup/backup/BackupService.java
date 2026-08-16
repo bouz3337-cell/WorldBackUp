@@ -175,6 +175,15 @@ public final class BackupService {
     private record WorldRef(String name, Path folder) {
     }
 
+    /** 백업 대상 월드들과 서버 루트를 후보로 삼아 플레이어 데이터를 찾는다. */
+    private static PlayerData.Located locatePlayerData(List<WorldRef> worlds, Path serverRoot) {
+        List<Path> bases = new ArrayList<>();
+        for (WorldRef ref : worlds) bases.add(ref.folder());
+        bases.add(serverRoot);
+        return PlayerData.locate(bases);
+    }
+
+
     private BackupEntry execute(BackupType type, String label, CommandSender initiator) throws Exception {
         BackupSettings settings = plugin.settings();
         BackupRepository repo = plugin.repository();
@@ -238,6 +247,18 @@ public final class BackupService {
                 targets.add(ref.folder());
                 worldNames.add(ref.name());
             }
+
+            // 플레이어 데이터는 위치를 전제하지 않고 찾아서 넣는다. 월드 폴더 안에 있으면
+            // 아래 dedupeTargets 가 중복을 걸러 주므로 그냥 넣어도 안전하다.
+            PlayerData.Located playerData = locatePlayerData(frozen, serverRoot);
+            for (Path path : playerData.paths()) {
+                if (FileUtil.relativize(serverRoot, path) == null) continue; // 서버 폴더 밖
+                targets.add(path);
+            }
+            if (!playerData.inventory()) {
+                PlayerData.warnMissing(plugin.getLogger());
+            }
+
             for (String relative : settings.serverFiles()) {
                 Path path = serverRoot.resolve(relative).normalize();
                 if (Files.exists(path)) {

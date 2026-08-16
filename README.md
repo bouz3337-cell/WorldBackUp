@@ -272,7 +272,13 @@ retention:
 ## 6. 백업에 포함되는 것
 
 - 월드 폴더 전체 (`region`, `entities`, `poi`, `data`, `level.dat`)
-- **플레이어 데이터** — 인벤토리·좌표·경험치(`world/playerdata`), 통계(`stats`), 발전 과제(`advancements`)
+- **플레이어 데이터** — 인벤토리·좌표·경험치(`playerdata`), 통계(`stats`), 발전 과제(`advancements`)
+
+  > 이 폴더들의 위치는 서버 구현·버전에 따라 다릅니다. 메인 월드 폴더 안일 수도, 서버 루트일
+  > 수도 있어서 플러그인이 **양쪽을 모두 찾아** 자동으로 백업에 넣습니다.
+  > 못 찾으면 서버 시작 시 콘솔에 경고가 뜨고, `/wb status` 에 <b>미포함</b>으로 표시되며,
+  > 백업할 때마다 다시 경고합니다. 조용히 빠지지 않습니다.
+  > (그때는 `targets.extra-paths` 에 실제 경로를 넣어 주세요.)
 - `ops.json`, `whitelist.json`, `banned-players.json`, `usercache.json`, `server.properties` 등 서버 파일
 - `targets.extra-paths` 에 지정한 플러그인 데이터 폴더
 
