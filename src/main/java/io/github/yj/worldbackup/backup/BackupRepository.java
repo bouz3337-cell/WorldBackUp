@@ -196,7 +196,7 @@ public final class BackupRepository {
         if (yaml == null) {
             Instant created = parseIdInstant(id, archive);
             return Optional.of(new BackupEntry(id, archive, created, BackupType.SCHEDULED, null,
-                    archiveBytes, 0L, 0, List.of(), List.of(), List.of(), "unknown", locked, false, null));
+                    archiveBytes, 0L, 0, List.of(), List.of(), List.of(), "unknown", locked, false, null, null));
         }
 
         Instant created = yaml.contains("created-at")
@@ -218,7 +218,9 @@ public final class BackupRepository {
                 yaml.getString("server-version", "unknown"),
                 locked || yaml.getBoolean("locked", false),
                 true,
-                yaml.getString("base-id")
+                yaml.getString("base-id"),
+                // 이 키가 없으면 기록하지 않던 시절의 백업이다. false 가 아니라 "모름" 이다.
+                yaml.contains("player-data") ? yaml.getBoolean("player-data") : null
         ));
     }
 
@@ -264,6 +266,7 @@ public final class BackupRepository {
         yaml.set("server-version", entry.serverVersion());
         yaml.set("locked", entry.locked());
         yaml.set("base-id", entry.baseId());
+        yaml.set("player-data", entry.playerData());
         return yaml.saveToString();
     }
 

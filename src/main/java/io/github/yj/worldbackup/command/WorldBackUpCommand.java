@@ -232,6 +232,22 @@ public final class WorldBackUpCommand {
         return openTag.replace("<", "").replace(">", "");
     }
 
+    /**
+     * 이 백업으로 인벤토리를 되돌릴 수 있는지.
+     *
+     * <p>"모름" 을 "포함" 으로 뭉개지 않는다. 사고가 나서 롤백한 뒤에 인벤토리가 그대로인 것을
+     * 알게 되는 것이 최악이라, 확실하지 않으면 확실하지 않다고 말한다.</p>
+     */
+    private String playerDataLabel(BackupEntry entry) {
+        if (entry.hasPlayerData()) {
+            return "<green>포함</green> <dark_gray>(인벤토리·경험치·통계)</dark_gray>";
+        }
+        if (entry.playerDataUnknown()) {
+            return "<yellow>알 수 없음</yellow> <dark_gray>(옛 버전으로 만든 백업)</dark_gray>";
+        }
+        return "<red><bold>미포함 - 인벤토리를 되돌릴 수 없습니다</bold></red>";
+    }
+
     private void info(CommandSender sender, BackupEntry entry) {
         Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>백업 정보</aqua> <dark_gray>─────</dark_gray>");
         Msg.sendRaw(sender, " <gray>ID       :</gray> <white>" + entry.id() + "</white>");
@@ -254,6 +270,7 @@ public final class WorldBackUpCommand {
         Msg.sendRaw(sender, " <gray>파일 크기:</gray> <aqua>" + FileUtil.humanBytes(entry.archiveBytes())
                 + "</aqua> <dark_gray>(스냅샷 원본 " + FileUtil.humanBytes(entry.originalBytes()) + ")</dark_gray>");
         Msg.sendRaw(sender, " <gray>파일 수  :</gray> <white>" + entry.fileCount() + "</white>");
+        Msg.sendRaw(sender, " <gray>플레이어 :</gray> " + playerDataLabel(entry));
         Msg.sendRaw(sender, " <gray>월드     :</gray> <white>"
                 + (entry.worlds().isEmpty() ? "-" : String.join(", ", entry.worlds())) + "</white>");
         Msg.sendRaw(sender, " <gray>포함 경로:</gray> <white>"

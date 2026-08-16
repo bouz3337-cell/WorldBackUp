@@ -269,6 +269,9 @@ public final class BackupService {
             if (!playerData.inventory()) {
                 PlayerData.warnMissing(plugin.getLogger(), serverRoot, playerDataBases);
             }
+            // 이 백업으로 인벤토리를 되돌릴 수 있는지 메타데이터에 남긴다. 복원할 때가 되어서야
+            // 알게 되면 늦는다. 목록과 복원 확인창에서 미리 보여 줄 수 있어야 한다.
+            final boolean hasPlayerData = playerData.inventory();
 
             for (String relative : settings.serverFiles()) {
                 Path path = serverRoot.resolve(relative).normalize();
@@ -340,7 +343,7 @@ public final class BackupService {
                     (fileCount, originalBytes) -> repo.toYamlString(new BackupEntry(
                             backupId, archivePath, created, type, cleanLabel,
                             0L, originalBytes, fileCount, finalRoots, finalWorlds, finalExcludes,
-                            Bukkit.getBukkitVersion(), false, true, baseBackupId)),
+                            Bukkit.getBukkitVersion(), false, true, baseBackupId, hasPlayerData)),
                     text -> {
                         progressText = text;
                         plugin.getLogger().info("[백업] 진행률 " + text);
@@ -350,7 +353,8 @@ public final class BackupService {
 
             BackupEntry entry = new BackupEntry(backupId, archivePath, created, type, cleanLabel,
                     result.archiveBytes(), result.originalBytes(), result.fileCount(),
-                    finalRoots, finalWorlds, finalExcludes, Bukkit.getBukkitVersion(), false, true, baseBackupId);
+                    finalRoots, finalWorlds, finalExcludes, Bukkit.getBukkitVersion(),
+                    false, true, baseBackupId, hasPlayerData);
             repo.writeMeta(entry);
             lastBackup = entry;
             lastError = null;
@@ -466,7 +470,7 @@ public final class BackupService {
             } catch (Exception e) {
                 plugin.getLogger().log(Level.WARNING, "[백업] 월드 저장 실패: " + world.getName(), e);
             }
-            refs.add(new WorldRef(world.getName(), world.getWorldFolder().toPath().toAbsolutePath().normalize()));
+            refs.add(new WorldRef(world.getName(), world.getWorldPath().toAbsolutePath().normalize()));
         }
 
         long flushed = System.currentTimeMillis() - flushStart;

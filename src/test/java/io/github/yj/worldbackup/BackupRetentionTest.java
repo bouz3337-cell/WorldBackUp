@@ -261,6 +261,50 @@ class BackupRetentionTest {
     }
 
     // ------------------------------------------------------------------
+    // 플레이어 데이터 포함 여부 기록
+
+    /**
+     * 복원하고 나서야 인벤토리가 안 돌아온다는 걸 알게 되면 늦는다.
+     * 백업 시점에 기록해 두고 목록·복원 확인창에서 미리 보여 줘야 한다.
+     */
+    @Test
+    void playerDataFlagSurvivesAMetadataRoundTrip() throws Exception {
+        BackupRepository repo = repository();
+        BackupEntry included = put(repo, "with-players", at(1, 9), BackupType.MANUAL, null, Boolean.TRUE);
+        BackupEntry missing = put(repo, "no-players", at(2, 9), BackupType.MANUAL, null, Boolean.FALSE);
+
+        assertTrue(reload(repo, included.id()).hasPlayerData());
+        assertFalse(reload(repo, included.id()).playerDataUnknown());
+
+        assertFalse(reload(repo, missing.id()).hasPlayerData());
+        assertFalse(reload(repo, missing.id()).playerDataUnknown(), "기록은 있고 값이 false 인 경우");
+    }
+
+    /**
+     * 이 정보를 기록하지 않던 시절의 백업은 "없음" 이 아니라 <b>"모름"</b> 이다.
+     * 모름을 없음으로 단정하면 멀쩡한 옛 백업까지 경고를 달게 되고,
+     * 모름을 있음으로 뭉개면 정작 필요할 때 인벤토리가 안 돌아온다.
+     */
+    @Test
+    void oldBackupsWithoutTheFlagAreReportedAsUnknown() throws Exception {
+        BackupRepository repo = repository();
+        BackupEntry entry = put(repo, "legacy", at(3, 9), BackupType.SCHEDULED, null, null);
+
+        // 옛 버전이 쓰던 사이드카에는 player-data 키 자체가 없다.
+        Path meta = entry.metaFile();
+        String yaml = Files.readString(meta, StandardCharsets.UTF_8);
+        assertFalse(yaml.contains("player-data:"), "이 테스트는 키가 없는 상태를 재현해야 한다");
+
+        BackupEntry loaded = reload(repo, "legacy");
+        assertTrue(loaded.playerDataUnknown(), "키가 없으면 모름이다");
+        assertFalse(loaded.hasPlayerData(), "모름을 포함으로 뭉개면 안 된다");
+    }
+
+    private BackupEntry reload(BackupRepository repo, String id) {
+        return repo.list().stream().filter(e -> e.id().equals(id)).findFirst().orElseThrow();
+    }
+
+    // ------------------------------------------------------------------
     // 남은 찌꺼기 정리
 
     @Test
@@ -310,11 +354,17 @@ class BackupRetentionTest {
      */
     private BackupEntry put(BackupRepository repo, String id, Instant createdAt,
                             BackupType type, String baseId) throws IOException {
+        return put(repo, id, createdAt, type, baseId, Boolean.TRUE);
+    }
+
+    /** @param playerData null 이면 이 정보를 기록하지 않던 시절의 백업을 재현한다 */
+    private BackupEntry put(BackupRepository repo, String id, Instant createdAt,
+                            BackupType type, String baseId, Boolean playerData) throws IOException {
         Path archive = repo.directory().resolve(BackupEntry.archiveName(id));
         Files.writeString(archive, "payload-" + id, StandardCharsets.UTF_8);
         BackupEntry entry = new BackupEntry(id, archive, createdAt, type, null,
                 Files.size(archive), 0L, 0, List.of("world"), List.of("world"), List.of(),
-                "test", false, true, baseId);
+                "test", false, true, baseId, playerData);
         repo.writeMeta(entry);
         return entry;
     }

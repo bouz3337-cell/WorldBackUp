@@ -50,6 +50,18 @@ public final class WorldBackUpPlugin extends JavaPlugin {
     private volatile boolean restoreFailureHold;
 
     /**
+     * 플레이어 데이터 탐색 결과 캐시.
+     *
+     * <p>{@link PlayerData#search} 는 정해진 후보에서 못 찾으면 서버 폴더를 훑는다. 그런데
+     * {@code /wb status} 가 이걸 <b>메인 스레드에서</b> 부르므로, 캐시가 없으면 명령 한 번마다
+     * 디스크를 훑게 된다. 하필 못 찾는 서버에서만 그렇게 되어 문제 있는 환경이 더 느려진다.</p>
+     */
+    private static final long PLAYER_DATA_CACHE_MILLIS = 60_000L;
+
+    private volatile PlayerData.Located playerDataCache;
+    private volatile long playerDataCachedAt;
+
+    /**
      * 월드가 로드되기 <b>전</b>에 호출된다. 예약된 복원은 반드시 이 시점에 처리해야
      * region 파일이 잠기지 않은 상태에서 안전하게 교체할 수 있다.
      */
@@ -140,6 +152,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         if (backupService == null) backupService = new BackupService(this);
         if (restoreService == null) restoreService = new RestoreService(this);
 
+        playerDataCache = null; // 설정이 바뀌면 대상 월드도 바뀔 수 있다
         checkRestoreFailureHold();
         startSchedule();
     }
@@ -297,9 +310,27 @@ public final class WorldBackUpPlugin extends JavaPlugin {
      * <p>{@code onEnable} 시점에는 월드가 이미 로드되어 있어 실제 폴더 위치를 알 수 있다.</p>
      */
     public PlayerData.Located locatePlayerData() {
+        PlayerData.Located cached = playerDataCache;
+        if (cached != null && System.currentTimeMillis() - playerDataCachedAt < PLAYER_DATA_CACHE_MILLIS) {
+            return cached;
+        }
         BackupSettings snapshot = settings;
-        if (snapshot == null) return PlayerData.locate(List.of());
-        return PlayerData.search(snapshot.serverRoot(), playerDataBases(snapshot));
+        PlayerData.Located located = snapshot == null
+                ? PlayerData.locate(List.of())
+                : PlayerData.search(snapshot.serverRoot(), playerDataBases(snapshot));
+        playerDataCache = located;
+        playerDataCachedAt = System.currentTimeMillis();
+        return located;
+    }
+
+    /**
+     * 첫 접속으로 플레이어 데이터 폴더가 막 생겼을 수 있다.
+     *
+     * <p>못 찾은 상태였을 때만 캐시를 버린다. 이미 찾아 둔 경우에는 접속마다 다시 뒤질 이유가 없다.</p>
+     */
+    public void refreshPlayerDataIfMissing() {
+        PlayerData.Located cached = playerDataCache;
+        if (cached != null && !cached.inventory()) playerDataCache = null;
     }
 
     /**
@@ -312,7 +343,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         List<Path> bases = new ArrayList<>();
         for (World world : Bukkit.getWorlds()) {
             if (!snapshot.includesWorld(world.getName())) continue;
-            Path folder = world.getWorldFolder().toPath().toAbsolutePath().normalize();
+            Path folder = world.getWorldPath().toAbsolutePath().normalize();
             Path levelRoot = WorldLayout.levelRoot(folder, snapshot.serverRoot());
             if (!bases.contains(levelRoot)) bases.add(levelRoot);
         }

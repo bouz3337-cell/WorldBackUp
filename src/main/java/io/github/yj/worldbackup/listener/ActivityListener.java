@@ -23,6 +23,8 @@ public final class ActivityListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onJoin(PlayerJoinEvent event) {
         plugin.backupService().markWorldChanged();
+        // 플레이어 데이터 폴더는 첫 접속 때 생긴다. 그전에 "못 찾음" 으로 굳은 판단을 풀어 준다.
+        plugin.refreshPlayerDataIfMissing();
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)

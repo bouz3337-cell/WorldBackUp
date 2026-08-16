@@ -16,6 +16,10 @@ import java.util.List;
  *                 복원 대상에서 제외하고, 보관 정책에서도 보호하지 않는다.
  * @param baseId   차등 백업이면 기준이 되는 전체 백업의 id, 전체 백업이면 null.
  *                 복원하려면 이 백업과 기준 백업 두 개가 모두 있어야 한다.
+ * @param playerData 이 백업에 플레이어 데이터(인벤토리·좌표·경험치)가 들어 있는지.
+ *                 {@code null} 이면 그 정보를 기록하지 않던 시절의 백업이라 <b>알 수 없다.</b>
+ *                 복원해 보고 나서야 인벤토리가 안 돌아온다는 걸 알게 되는 것이 최악이므로,
+ *                 확실하지 않으면 확실하지 않다고 말한다.
  */
 public record BackupEntry(
         String id,
@@ -32,7 +36,8 @@ public record BackupEntry(
         String serverVersion,
         boolean locked,
         boolean complete,
-        String baseId
+        String baseId,
+        Boolean playerData
 ) {
 
     public static final String ARCHIVE_PREFIX = "wb-";
@@ -110,13 +115,23 @@ public record BackupEntry(
         return baseId != null && !baseId.isBlank();
     }
 
+    /** 인벤토리를 되돌릴 수 있다고 <b>확신</b>할 수 있는 백업인지. 모르면 false. */
+    public boolean hasPlayerData() {
+        return Boolean.TRUE.equals(playerData);
+    }
+
+    /** 플레이어 데이터 포함 여부를 기록하지 않던 시절의 백업인지. */
+    public boolean playerDataUnknown() {
+        return playerData == null;
+    }
+
     public BackupEntry withLocked(boolean value) {
         return new BackupEntry(id, archive, createdAt, type, label, archiveBytes, originalBytes,
-                fileCount, roots, worlds, excludes, serverVersion, value, complete, baseId);
+                fileCount, roots, worlds, excludes, serverVersion, value, complete, baseId, playerData);
     }
 
     public BackupEntry withComplete(boolean value) {
         return new BackupEntry(id, archive, createdAt, type, label, archiveBytes, originalBytes,
-                fileCount, roots, worlds, excludes, serverVersion, locked, value, baseId);
+                fileCount, roots, worlds, excludes, serverVersion, locked, value, baseId, playerData);
     }
 }

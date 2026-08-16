@@ -82,6 +82,18 @@ public final class RestoreService {
         }
         Msg.sendRaw(sender, " <gray>대상     :</gray> <white>"
                 + (roots.isEmpty() ? "(메타데이터 없음 - 덮어쓰기만)" : String.join(", ", roots)) + "</white>");
+        // 인벤토리가 안 들어 있는 백업이면 여기서 알려야 한다. 되돌린 뒤에 알면 늦는다.
+        if (!entry.hasPlayerData()) {
+            Msg.sendRaw(sender, "");
+            if (entry.playerDataUnknown()) {
+                Msg.sendRaw(sender, " <yellow><bold>이 백업에 플레이어 데이터가 있는지 알 수 없습니다.</bold></yellow>");
+                Msg.sendRaw(sender, " <gray>옛 버전으로 만든 백업입니다. 인벤토리·경험치가 되돌아오지 않을 수 있습니다.</gray>");
+            } else {
+                Msg.sendRaw(sender, " <red><bold>이 백업에는 플레이어 데이터가 없습니다.</bold></red>");
+                Msg.sendRaw(sender, " <gray>지형은 되돌아오지만 인벤토리·좌표·경험치는 지금 상태 그대로 남습니다.</gray>");
+            }
+        }
+
         Msg.sendRaw(sender, "");
         Msg.sendRaw(sender, " <red>이 시점 이후의 모든 변경사항(건축물, 인벤토리 등)이 사라집니다.</red>");
         Msg.sendRaw(sender, " <red>서버가 자동으로 종료되며, 다시 켜질 때 복원이 적용됩니다.</red>");

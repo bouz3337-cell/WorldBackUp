@@ -92,6 +92,10 @@ targets:
     - "**/*.log"
     - "**/*.log.gz"
     - "plugins/WorldBackUp/backups/**"
+    # 서버가 손상된 region 파일을 고치면서 남기는 사본입니다.
+    # (r.0.0.mca.-5062505702693227547.backup 같은 이름)
+    # 스스로 지우지 않고 계속 쌓이는데 region 파일만큼 커서, 빼지 않으면 백업이 두 배가 됩니다.
+    - "**/*.mca.*.backup"
 
 retention:
   # 보관할 최대 백업 개수 (0 = 무제한)

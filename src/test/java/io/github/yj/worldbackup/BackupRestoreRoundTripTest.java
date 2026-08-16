@@ -543,14 +543,14 @@ class BackupRestoreRoundTripTest {
                 0L,
                 (fileCount, originalBytes) -> repository.toYamlString(new BackupEntry(
                         id, archive, now, BackupType.MANUAL, "테스트", 0L, originalBytes, fileCount,
-                        roots, List.of("world"), EXCLUDES, "test", false, true, baseId)),
+                        roots, List.of("world"), EXCLUDES, "test", false, true, baseId, true)),
                 null,
                 LOG
         );
 
         BackupEntry entry = new BackupEntry(id, archive, now, BackupType.MANUAL, "테스트",
                 result.archiveBytes(), result.originalBytes(), result.fileCount(),
-                roots, List.of("world"), EXCLUDES, "test", false, true, baseId);
+                roots, List.of("world"), EXCLUDES, "test", false, true, baseId, true);
         repository.writeMeta(entry);
         return entry;
     }
