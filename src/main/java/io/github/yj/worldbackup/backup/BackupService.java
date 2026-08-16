@@ -175,10 +175,13 @@ public final class BackupService {
     private record WorldRef(String name, Path folder) {
     }
 
-    /** 백업 대상 월드들과 서버 루트를 후보로 삼아 플레이어 데이터를 찾는다. */
+    /** 플레이어 데이터를 찾아볼 기준. 차원 폴더가 아니라 <b>월드 폴더</b>여야 한다. */
     private static List<Path> playerDataBases(List<WorldRef> worlds, Path serverRoot) {
         List<Path> bases = new ArrayList<>();
-        for (WorldRef ref : worlds) bases.add(ref.folder());
+        for (WorldRef ref : worlds) {
+            Path levelRoot = WorldLayout.levelRoot(ref.folder(), serverRoot);
+            if (!bases.contains(levelRoot)) bases.add(levelRoot);
+        }
         bases.add(serverRoot);
         return bases;
     }
@@ -239,12 +242,19 @@ public final class BackupService {
             List<Path> targets = new ArrayList<>();
             List<String> worldNames = new ArrayList<>();
             for (WorldRef ref : frozen) {
-                if (FileUtil.relativize(serverRoot, ref.folder()) == null) {
+                // 26.2 는 차원 폴더(world/dimensions/minecraft/overworld)를 돌려준다.
+                // 거기만 담으면 지형은 되돌아오는데 playerdata, level.dat, data 가 빠진다.
+                Path levelRoot = WorldLayout.levelRoot(ref.folder(), serverRoot);
+                if (FileUtil.relativize(serverRoot, levelRoot) == null) {
                     plugin.getLogger().warning("[백업] 월드 '" + ref.name() + "' 가 서버 폴더("
-                            + serverRoot + ") 밖에 있어 백업할 수 없습니다: " + ref.folder());
+                            + serverRoot + ") 밖에 있어 백업할 수 없습니다: " + levelRoot);
                     continue;
                 }
-                targets.add(ref.folder());
+                if (!levelRoot.equals(ref.folder())) {
+                    plugin.getLogger().info("[백업] 월드 '" + ref.name() + "' 는 차원 폴더라 실제 월드 폴더로 올라갑니다: "
+                            + FileUtil.relativize(serverRoot, levelRoot));
+                }
+                targets.add(levelRoot);
                 worldNames.add(ref.name());
             }
 

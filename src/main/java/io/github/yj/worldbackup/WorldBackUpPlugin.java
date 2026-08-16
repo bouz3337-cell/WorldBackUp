@@ -4,6 +4,7 @@ import io.github.yj.worldbackup.backup.BackupRepository;
 import io.github.yj.worldbackup.backup.BackupService;
 import io.github.yj.worldbackup.backup.BackupType;
 import io.github.yj.worldbackup.backup.PlayerData;
+import io.github.yj.worldbackup.backup.WorldLayout;
 import io.github.yj.worldbackup.command.WorldBackUpCommand;
 import io.github.yj.worldbackup.config.BackupSettings;
 import io.github.yj.worldbackup.listener.ActivityListener;
@@ -301,12 +302,19 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         return PlayerData.search(snapshot.serverRoot(), playerDataBases(snapshot));
     }
 
-    /** 플레이어 데이터를 찾아볼 기준 경로들. 로드된 월드 폴더와 서버 루트. */
+    /**
+     * 플레이어 데이터를 찾아볼 기준 경로들.
+     *
+     * <p>{@code getWorldFolder()} 가 차원 폴더를 돌려주는 버전이 있어서, 그대로 쓰면
+     * 그 위에 있는 {@code playerdata} 를 영영 못 찾는다. 월드 폴더까지 올라가서 본다.</p>
+     */
     private List<Path> playerDataBases(BackupSettings snapshot) {
         List<Path> bases = new ArrayList<>();
         for (World world : Bukkit.getWorlds()) {
             if (!snapshot.includesWorld(world.getName())) continue;
-            bases.add(world.getWorldFolder().toPath().toAbsolutePath().normalize());
+            Path folder = world.getWorldFolder().toPath().toAbsolutePath().normalize();
+            Path levelRoot = WorldLayout.levelRoot(folder, snapshot.serverRoot());
+            if (!bases.contains(levelRoot)) bases.add(levelRoot);
         }
         bases.add(snapshot.serverRoot());
         return bases;
