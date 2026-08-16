@@ -19,6 +19,7 @@ import java.nio.file.attribute.FileTime;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashSet;
@@ -42,7 +43,34 @@ public final class RestoreApplier {
     private static final DateTimeFormatter STAMP =
             DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneId.systemDefault());
 
+    /**
+     * 사람이 확인해야 하는 복원 실패 기록의 파일 이름 앞부분.
+     *
+     * <p>이 파일이 남아 있는 동안 플러그인은 자동 백업과 보관 정리를 하지 않는다.
+     * 반쯤 복원된 월드를 계속 백업하다 보면 멀쩡한 예전 백업이 정책에 밀려 사라지기 때문이다.</p>
+     */
+    public static final String FAILURE_PREFIX = "restore-failed-";
+
+    /** 복원이 성공하면 옛 실패 기록에 이 꼬리표를 붙여 둔다. 기록은 남기되 정지는 풀기 위함이다. */
+    private static final String RESOLVED_SUFFIX = ".resolved";
+
     private RestoreApplier() {
+    }
+
+    /** 아직 처리되지 않은 복원 실패 기록들. 비어 있지 않으면 자동 작업을 멈춰야 한다. */
+    public static List<Path> failureMarkers(Path dataFolder) {
+        if (!Files.isDirectory(dataFolder)) return List.of();
+        try (Stream<Path> stream = Files.list(dataFolder)) {
+            return stream.filter(Files::isRegularFile)
+                    .filter(path -> {
+                        String name = path.getFileName().toString();
+                        return name.startsWith(FAILURE_PREFIX) && name.endsWith(".yml");
+                    })
+                    .sorted()
+                    .toList();
+        } catch (IOException e) {
+            return List.of();
+        }
     }
 
     private static final class Stats {
@@ -59,7 +87,7 @@ public final class RestoreApplier {
 
         if (Files.exists(processing)) {
             // 직전 복원이 중간에 끊겼다. 같은 작업을 반복하면 더 위험하므로 중단한다.
-            Path failed = dataFolder.resolve("restore-failed-" + STAMP.format(Instant.now()) + ".yml");
+            Path failed = dataFolder.resolve(FAILURE_PREFIX + STAMP.format(Instant.now()) + ".yml");
             try {
                 Files.move(processing, failed, StandardCopyOption.REPLACE_EXISTING);
             } catch (IOException ignored) {
@@ -118,10 +146,17 @@ public final class RestoreApplier {
                 throw new IOException("차등 백업에 파일 목록이 없어 복원할 수 없습니다.");
             }
 
+            // 백업이 실제로 데이터를 갖고 있는 경로만 교체 대상으로 남긴다. 내용이 없는 경로를
+            // 비우면 복원되지 않고 사라지기만 하기 때문이다. 반대로 그 하나 때문에 복원 전체를
+            // 거부하면, 백업 시점에 비어 있던 extra-paths 폴더 하나가 월드 복원까지 막는다.
+            if (!roots.isEmpty()) {
+                roots = coveredRoots(pending.archive(), manifest, roots, log);
+            }
+
             // 기존 데이터를 지우기 전에 아카이브가 멀쩡한지부터 확인한다.
             // 여기서 실패하면 아무것도 건드리지 않은 상태로 중단되므로 월드는 그대로 남는다.
             if (pending.verifyArchive()) {
-                verify(pending.archive(), pending.baseArchive(), manifest, roots, log);
+                verify(pending.archive(), pending.baseArchive(), manifest, log);
             }
 
             Path replacedDir = null;
@@ -179,10 +214,97 @@ public final class RestoreApplier {
         log.info("==================================================================");
 
         writeReport(dataFolder, pending, stats, elapsed, error, log);
+        if (error == null) {
+            resolveFailureMarkers(dataFolder, log);
+        } else {
+            writeFailureMarker(dataFolder, pending, error, log);
+        }
         deleteQuietly(processing);
     }
 
+    /**
+     * 복원이 실패했음을 파일로 남긴다.
+     *
+     * <p>여기까지 왔다는 건 기존 데이터를 이미 지웠을 수 있다는 뜻이다. 무인 서버라면 아무도
+     * 콘솔을 보지 않으므로, 이 표식이 없으면 반쯤 복원된 월드가 그대로 계속 백업되고
+     * 멀쩡한 예전 백업이 보관 정책에 밀려 사라진다. 표식이 있는 동안 플러그인은
+     * 자동 백업과 보관 정리를 멈춘다.</p>
+     */
+    private static void writeFailureMarker(Path dataFolder, PendingRestore pending, String error, Logger log) {
+        Path marker = dataFolder.resolve(FAILURE_PREFIX + STAMP.format(Instant.now()) + ".yml");
+        try {
+            YamlConfiguration yaml = new YamlConfiguration();
+            yaml.set("id", pending.id());
+            yaml.set("archive", pending.archive().toString());
+            yaml.set("requested-by", pending.requestedBy());
+            yaml.set("failed-at", BackupEntry.DISPLAY_FORMAT.format(Instant.now()));
+            yaml.set("error", error);
+            yaml.set("안내", "이 파일이 있는 동안 자동 백업과 보관 정리가 멈춥니다. "
+                    + "월드를 확인한 뒤 이 파일을 지우고 /wb reload 를 실행하세요.");
+            Files.writeString(marker, yaml.saveToString(), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            log.log(Level.SEVERE, "[WorldBackUp] 복원 실패 기록을 남기지 못했습니다.", e);
+            return;
+        }
+        log.severe("==================================================================");
+        log.severe("[WorldBackUp] 복원이 실패해 " + marker.getFileName() + " 을 남겼습니다.");
+        log.severe("[WorldBackUp] 이 파일이 있는 동안 자동 백업과 보관 정리를 멈춥니다.");
+        log.severe("[WorldBackUp] 월드를 확인한 뒤 파일을 지우고 /wb reload 를 실행하세요.");
+        log.severe("==================================================================");
+    }
+
+    /** 복원이 성공했으면 옛 실패 표식을 해제한다. 기록은 남기고 정지만 푼다. */
+    private static void resolveFailureMarkers(Path dataFolder, Logger log) {
+        for (Path marker : failureMarkers(dataFolder)) {
+            Path resolved = marker.resolveSibling(marker.getFileName() + RESOLVED_SUFFIX);
+            try {
+                Files.move(marker, resolved, StandardCopyOption.REPLACE_EXISTING);
+                log.info("[WorldBackUp] 복원이 성공해 이전 실패 기록을 해제했습니다: " + resolved.getFileName());
+            } catch (IOException e) {
+                log.warning("[WorldBackUp] 이전 실패 기록을 해제하지 못했습니다: " + marker.getFileName());
+            }
+        }
+    }
+
     // ------------------------------------------------------------------
+
+    /**
+     * 백업이 실제로 데이터를 갖고 있는 root 만 골라낸다.
+     *
+     * <p>zip 의 중앙 디렉터리만 읽으므로 {@link #verify} 와 달리 거의 비용이 없다.
+     * 그래서 {@code verify-archive} 를 꺼 두어도 항상 수행한다 - 이 판단이 빠지면
+     * "비우기만 하고 채우지 않는" 경로가 생겨 데이터가 사라지기 때문이다.</p>
+     *
+     * @return 복원 대상으로 삼을 root 목록 (원래 순서 유지)
+     * @throws IOException 어떤 root 에도 복원할 데이터가 없을 때
+     */
+    private static List<String> coveredRoots(Path archive, Manifest manifest,
+                                             List<String> roots, Logger log) throws IOException {
+        // 차등 백업이면 매니페스트가 그 시점의 정답이고, 전체 백업이면 zip 에 든 파일 그대로다.
+        Set<String> files = manifest != null ? manifest.paths() : dataEntryNames(archive);
+
+        List<String> covered = new ArrayList<>();
+        for (String root : roots) {
+            boolean hasData = false;
+            for (String path : files) {
+                if (underRoots(path, List.of(root))) {
+                    hasData = true;
+                    break;
+                }
+            }
+            if (hasData) {
+                covered.add(root);
+            } else {
+                log.warning("[WorldBackUp] 백업에 '" + root + "' 데이터가 없어 이 경로는 건드리지 않습니다. "
+                        + "(백업 시점에 비어 있었을 수 있습니다)");
+            }
+        }
+        if (covered.isEmpty()) {
+            throw new IOException("백업에 복원할 대상 데이터가 하나도 없습니다: " + String.join(", ", roots)
+                    + " (이 백업으로는 해당 경로를 복원할 수 없습니다)");
+        }
+        return covered;
+    }
 
     /**
      * 기존 데이터를 지우기 전에 아카이브가 멀쩡한지 확인한다.
@@ -193,8 +315,7 @@ public final class RestoreApplier {
      * <p>차등 백업이면 기준 백업까지 함께 읽고, 매니페스트에 적힌 파일이 둘 중 어딘가에는
      * 반드시 있는지 확인한다.</p>
      */
-    private static void verify(Path archive, Path baseArchive, Manifest manifest,
-                               List<String> roots, Logger log) throws IOException {
+    private static void verify(Path archive, Path baseArchive, Manifest manifest, Logger log) throws IOException {
         Set<String> available = new HashSet<>(readAndCheck(archive, log));
         if (baseArchive != null) {
             available.addAll(readAndCheck(baseArchive, log));
@@ -212,20 +333,6 @@ public final class RestoreApplier {
                     throw new IOException("차등 백업과 기준 백업 어디에도 없는 파일이 있습니다: " + path
                             + " (기준 백업이 이 차등 백업과 짝이 맞지 않습니다)");
                 }
-            }
-        }
-
-        for (String root : roots) {
-            boolean covered = false;
-            for (String path : finalFiles) {
-                if (underRoots(path, List.of(root))) {
-                    covered = true;
-                    break;
-                }
-            }
-            if (!covered) {
-                throw new IOException("백업에 '" + root + "' 데이터가 들어 있지 않습니다. "
-                        + "이 백업으로는 해당 경로를 복원할 수 없습니다.");
             }
         }
         log.info("[WorldBackUp] 검사 통과 - 복원 대상 " + finalFiles.size() + "개 파일");

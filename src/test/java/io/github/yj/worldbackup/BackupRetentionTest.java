@@ -158,6 +158,108 @@ class BackupRetentionTest {
         assertTrue(ids(repo).contains("f-base"), "차등본이 사라진 뒤에도 이번 회차에서는 기준을 남긴다");
     }
 
+    /**
+     * 진행 중인 차등 백업의 기준은 어떤 경로로도 사라지면 안 된다.
+     *
+     * <p>압축이 끝나기 전에는 딸린 차등본이 아직 디스크에 없어 {@code dependents} 가 비어 보인다.
+     * 그 틈에 기준이 지워지면 방금 만든 차등본은 태어나자마자 복원 불가가 된다.</p>
+     */
+    @Test
+    void pinnedBaseSurvivesEveryDeletionPath() throws Exception {
+        BackupRepository repo = repository();
+        BackupEntry base = put(repo, "base", at(30, 9), BackupType.SCHEDULED, null);
+        put(repo, "filler", at(29, 9), BackupType.SCHEDULED, null);
+
+        repo.pin(base.id()); // 지금 이 기준으로 차등 백업을 압축하는 중이라고 가정
+
+        // 나이로도, 개수로도, 공간 확보로도 지워지면 안 된다.
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-age-days", 1);
+            cfg.set("retention.max-backups", 1);
+        }));
+        repo.freeUpSpace(settings(cfg -> {
+        }), Long.MAX_VALUE);
+
+        assertTrue(ids(repo).contains("base"), "사용 중인 기준 백업은 정책이 지우면 안 된다");
+        assertFalse(repo.delete(base), "직접 삭제도 거부해야 한다");
+        assertTrue(Files.exists(base.archive()));
+
+        // 백업이 끝나면 평범한 백업으로 돌아간다.
+        repo.unpin();
+        assertTrue(repo.delete(base));
+        assertFalse(ids(repo).contains("base"));
+    }
+
+    // ------------------------------------------------------------------
+    // 최소 보관 개수 (무인 운영 안전망)
+
+    /**
+     * 무인 서버가 오래 놀면 나이 정책 하나로 백업이 <b>전멸</b>할 수 있다.
+     * 접속자가 없으면 백업은 건너뛰지만 보관 정리는 계속 돌고, keep-daily 는 "최근 N일 안에
+     * 만들어진 백업"만 지키므로 그 기간에 백업이 없으면 아무도 지키지 못한다.
+     */
+    @Test
+    void ageAloneCanNeverWipeOutEveryBackup() throws Exception {
+        BackupRepository repo = repository();
+        put(repo, "d40", at(40, 9), BackupType.SCHEDULED, null);
+        put(repo, "d39", at(39, 9), BackupType.SCHEDULED, null);
+        put(repo, "d38", at(38, 9), BackupType.SCHEDULED, null);
+        put(repo, "d37", at(37, 9), BackupType.SCHEDULED, null);
+
+        // 넷 다 나이로는 삭제 대상이고 keep-daily 창(최근 7일) 밖이다.
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-age-days", 14);
+            cfg.set("retention.keep-daily", 7);
+            cfg.set("retention.min-backups", 2);
+        }));
+
+        assertEquals(List.of("d37", "d38"), ids(repo), "최신 것부터 하한선만큼 남아야 한다");
+    }
+
+    @Test
+    void minBackupsIsIgnoredWhenSetToZero() throws Exception {
+        BackupRepository repo = repository();
+        put(repo, "old", at(40, 9), BackupType.SCHEDULED, null);
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-age-days", 14);
+            cfg.set("retention.min-backups", 0);
+        }));
+
+        assertTrue(ids(repo).isEmpty(), "하한선을 끄면 예전처럼 전부 지운다");
+    }
+
+    /** 차등본만 되살리면 기준을 잃어 복원 불가가 된다. 기준도 함께 되살려야 한다. */
+    @Test
+    void rescuingADifferentialAlsoRescuesItsBase() throws Exception {
+        BackupRepository repo = repository();
+        BackupEntry base = put(repo, "base", at(40, 9), BackupType.SCHEDULED, null);
+        put(repo, "diff", at(39, 9), BackupType.SCHEDULED, base.id());
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-age-days", 14);
+            cfg.set("retention.min-backups", 1);
+        }));
+
+        assertEquals(List.of("diff", "base"), ids(repo), "기준이 함께 남아야 한다");
+        assertTrue(repo.list().stream().allMatch(BackupEntry::complete), "되살린 차등본은 복원 가능해야 한다");
+    }
+
+    /** 손상된 백업은 되살려도 복원에 못 쓰므로 하한선에 세지 않는다. */
+    @Test
+    void brokenBackupsDoNotCountTowardTheMinimum() throws Exception {
+        BackupRepository repo = repository();
+        put(repo, "healthy", at(40, 9), BackupType.SCHEDULED, null);
+        put(repo, "orphan", at(39, 9), BackupType.SCHEDULED, "사라진-기준"); // 기준이 없는 차등본
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-age-days", 14);
+            cfg.set("retention.min-backups", 1);
+        }));
+
+        assertEquals(List.of("healthy"), ids(repo), "멀쩡한 백업이 하한선을 채워야 한다");
+    }
+
     // ------------------------------------------------------------------
     // 남은 찌꺼기 정리
 
@@ -193,6 +295,7 @@ class BackupRetentionTest {
     private BackupSettings settings(Consumer<YamlConfiguration> tweak) {
         YamlConfiguration cfg = new YamlConfiguration();
         cfg.set("retention.max-backups", 0);
+        cfg.set("retention.min-backups", 0);
         cfg.set("retention.max-age-days", 0);
         cfg.set("retention.keep-daily", 0);
         cfg.set("retention.protect-manual", false);

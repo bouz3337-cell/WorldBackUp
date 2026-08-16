@@ -79,8 +79,14 @@ public final class BackupService {
         this.nextRunAt = millis;
     }
 
+    /**
+     * 월드에 변화가 있었다고 표시한다.
+     *
+     * <p>블록 설치·파괴 이벤트마다 불리는, 이 플러그인에서 가장 뜨거운 경로다. 이미 켜져 있으면
+     * 쓰지 않는다 - volatile 쓰기는 메모리 배리어를 동반하지만 읽기는 사실상 공짜다.</p>
+     */
     public void markWorldChanged() {
-        worldChanged.set(true);
+        if (!worldChanged.get()) worldChanged.set(true);
     }
 
     /** 다음 백업을 차등이 아닌 전체 백업으로 만든다. */
@@ -103,17 +109,28 @@ public final class BackupService {
             future.completeExceptionally(new IllegalStateException("이미 백업이 진행 중입니다."));
             return future;
         }
-        Sched.async(plugin, () -> {
-            try {
-                future.complete(execute(type, label, initiator));
-            } catch (Throwable t) {
-                lastError = t.getMessage();
-                future.completeExceptionally(t);
-            } finally {
-                running.set(false);
-                progressText = "";
-            }
-        });
+        try {
+            Sched.async(plugin, () -> {
+                try {
+                    future.complete(execute(type, label, initiator));
+                } catch (Throwable t) {
+                    lastError = t.getMessage();
+                    future.completeExceptionally(t);
+                } finally {
+                    running.set(false);
+                    progressText = "";
+                }
+            });
+        } catch (Throwable t) {
+            // 스케줄러가 등록을 거부했다(대개 서버 종료 중). 여기서 플래그를 되돌리지 않으면
+            // running 이 영원히 true 로 남아 이후 모든 백업은 물론 /wb restore 까지
+            // "백업이 진행 중입니다" 로 막히고, 재시작 말고는 풀 방법이 없다.
+            // future 도 완결시켜야 호출자의 whenComplete 가 무응답으로 끝나지 않는다.
+            running.set(false);
+            progressText = "";
+            lastError = t.getMessage();
+            future.completeExceptionally(t);
+        }
         return future;
     }
 
@@ -189,6 +206,7 @@ public final class BackupService {
             }
         }
         final BackupEntry base = baseEntry;
+        final Manifest baseFiles = baseManifest;
         final String baseBackupId = base == null ? null : base.id();
 
         if (settings.broadcast()) {
@@ -200,6 +218,11 @@ public final class BackupService {
         // 얼리는 작업부터 원복까지 통째로 감싼다. freezeWorlds 가 실패하거나 타임아웃 나더라도
         // finally 는 반드시 실행되고, 원복에 필요한 정보는 frozenWorlds 에 이미 들어 있다.
         try {
+            // 기준 백업을 "사용 중"으로 못 박는다. 아래 ensureDiskSpace 가 공간을 확보하려고
+            // 백업을 지울 수 있는데, 하필 이 기준을 지우면 지금 만드는 차등본은 태어나자마자
+            // 복원 불가([손상])가 된다. 백업했다고 믿는 쪽이 더 위험하므로 어떤 경로로도 막는다.
+            if (base != null) repo.pin(base.id());
+
             // 1) 메인 스레드: 플레이어/월드 저장 후 자동 저장을 잠시 끈다.
             List<WorldRef> frozen = callSync(() -> freezeWorlds(settings));
 
@@ -253,11 +276,19 @@ public final class BackupService {
             }
 
             // 3) 용량 확인 (제외 패턴을 반영해야 진행률과 예상 용량이 실제와 맞는다)
-            long expectedBytes = 0L;
+            //
+            // 진행률은 스냅샷 전체 기준이지만, 디스크 여유는 "이번에 실제로 쓸 양" 으로 봐야 한다.
+            // 차등 백업에 전체 크기를 들이대면 200MB 를 쓰면서 10GB 를 요구하게 되고,
+            // ensureDiskSpace 가 그 공간을 만들겠다며 멀쩡한 백업을 지운 뒤 결국 실패한다.
+            FileUtil.ChangeFilter changed = baseFiles == null ? null
+                    : (relative, size, modified) -> !baseFiles.unchanged(relative, size, modified);
+
+            FileUtil.Sizes sizes = FileUtil.Sizes.ZERO;
             for (Path target : targets) {
-                expectedBytes += FileUtil.directorySize(target, serverRoot, settings.exclude());
+                sizes = sizes.plus(FileUtil.measure(target, serverRoot, settings.exclude(), changed));
             }
-            ensureDiskSpace(settings, repo, expectedBytes);
+            long expectedBytes = sizes.totalBytes();
+            ensureDiskSpace(settings, repo, sizes.changedBytes());
 
             // 4) 압축
             final List<String> finalWorlds = List.copyOf(worldNames);
@@ -313,7 +344,8 @@ public final class BackupService {
             if (base != null) {
                 int reused = result.fileCount() - result.storedCount();
                 plugin.getLogger().info("[백업] 차등 백업 (기준 " + base.id() + ") - 저장 "
-                        + result.storedCount() + "개 / 재사용 " + reused + "개");
+                        + result.storedCount() + "개 " + FileUtil.humanBytes(result.storedBytes())
+                        + " / 재사용 " + reused + "개");
             }
             if (result.skippedCount() > 0) {
                 plugin.getLogger().warning("[백업] 읽지 못해 건너뛴 파일 " + result.skippedCount() + "개");
@@ -340,7 +372,8 @@ public final class BackupService {
             }
             throw t;
         } finally {
-            // 5) 메인 스레드: 자동 저장 원복
+            // 5) 기준 백업 고정 해제 + 메인 스레드에서 자동 저장 원복
+            repo.unpin();
             thawWorlds();
         }
     }
@@ -435,8 +468,9 @@ public final class BackupService {
         }
     }
 
-    private void ensureDiskSpace(BackupSettings settings, BackupRepository repo, long expectedBytes) {
-        long estimatedArchive = Math.max(1L, (long) (expectedBytes * 0.6)); // 압축률을 보수적으로 가정
+    /** @param plannedBytes 이번 아카이브에 실제로 저장할 원본 바이트 (차등 백업이면 바뀐 파일만) */
+    private void ensureDiskSpace(BackupSettings settings, BackupRepository repo, long plannedBytes) {
+        long estimatedArchive = Math.max(1L, (long) (plannedBytes * 0.6)); // 압축률을 보수적으로 가정
         long required = estimatedArchive + settings.minFreeDiskBytes();
         long free = FileUtil.usableSpace(repo.directory());
         if (free >= required) return;

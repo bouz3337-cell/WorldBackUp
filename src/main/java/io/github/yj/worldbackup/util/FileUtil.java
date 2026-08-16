@@ -16,32 +16,56 @@ public final class FileUtil {
     private FileUtil() {
     }
 
-    /** 폴더 전체 용량(바이트). 접근 불가 파일은 무시한다. */
-    public static long directorySize(Path path) {
-        return directorySize(path, null, null);
+    /**
+     * 백업 대상을 한 번 훑어 얻은 두 가지 크기.
+     *
+     * @param totalBytes   스냅샷 전체 크기. 진행률의 분모가 된다.
+     * @param changedBytes 이번 아카이브에 <b>실제로 저장될</b> 크기. 디스크 여유 판단의 기준이 된다.
+     *                     전체 백업이면 {@code totalBytes} 와 같고, 차등 백업이면 바뀐 파일만 더한 값이다.
+     */
+    public record Sizes(long totalBytes, long changedBytes) {
+
+        public static final Sizes ZERO = new Sizes(0L, 0L);
+
+        public Sizes plus(Sizes other) {
+            return new Sizes(totalBytes + other.totalBytes, changedBytes + other.changedBytes);
+        }
     }
 
     /**
-     * 폴더 전체 용량(바이트). 제외 패턴에 걸리는 파일/폴더는 세지 않는다.
+     * 이 파일을 이번 아카이브에 새로 저장해야 하는지 판단한다.
      *
-     * <p>실제 압축과 같은 기준으로 세야 진행률과 디스크 예상치가 맞는다.</p>
+     * <p>차등 백업의 기준 매니페스트와 비교하는 용도다. {@code null} 을 넘기면 전부 저장 대상으로 본다.</p>
      */
-    public static long directorySize(Path path, Path serverRoot, GlobMatcher exclude) {
-        if (path == null || !Files.exists(path)) return 0L;
+    @FunctionalInterface
+    public interface ChangeFilter {
+        boolean stores(String relativePath, long size, long lastModifiedMillis);
+    }
+
+    /**
+     * 백업 대상의 용량을 잰다. 제외 패턴에 걸리는 파일/폴더는 세지 않는다.
+     *
+     * <p>실제 압축과 <b>같은 기준</b>으로 세야 진행률과 디스크 예상치가 실제와 맞는다.
+     * 특히 차등 백업은 스냅샷 전체가 아니라 바뀐 파일만 쓰므로, 두 값을 갈라서 돌려준다.
+     * 예전에는 전체 크기 하나만 재서, 200MB 를 쓸 차등 백업이 10GB 의 여유를 요구하며
+     * 멀쩡한 백업을 지우고도 실패했다.</p>
+     */
+    public static Sizes measure(Path path, Path serverRoot, GlobMatcher exclude, ChangeFilter filter) {
+        if (path == null || !Files.exists(path)) return Sizes.ZERO;
         boolean filtered = serverRoot != null && exclude != null && !exclude.isEmpty();
 
         if (Files.isRegularFile(path)) {
-            if (filtered) {
-                String relative = relativize(serverRoot, path);
-                if (relative == null || exclude.matchesFile(relative)) return 0L;
-            }
+            String relative = serverRoot == null ? null : relativize(serverRoot, path);
+            if (filtered && (relative == null || exclude.matchesFile(relative))) return Sizes.ZERO;
             try {
-                return Files.size(path);
+                BasicFileAttributes attrs = Files.readAttributes(path, BasicFileAttributes.class);
+                return sizeOf(relative, attrs, filter);
             } catch (IOException e) {
-                return 0L;
+                return Sizes.ZERO;
             }
         }
-        final long[] total = {0L};
+
+        final long[] total = {0L, 0L};
         try {
             Files.walkFileTree(path, new SimpleFileVisitor<>() {
                 @Override
@@ -56,11 +80,13 @@ public final class FileUtil {
 
                 @Override
                 public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                    if (filtered) {
-                        String relative = relativize(serverRoot, file);
-                        if (relative == null || exclude.matchesFile(relative)) return FileVisitResult.CONTINUE;
+                    String relative = serverRoot == null ? null : relativize(serverRoot, file);
+                    if (filtered && (relative == null || exclude.matchesFile(relative))) {
+                        return FileVisitResult.CONTINUE;
                     }
-                    total[0] += attrs.size();
+                    Sizes sizes = sizeOf(relative, attrs, filter);
+                    total[0] += sizes.totalBytes();
+                    total[1] += sizes.changedBytes();
                     return FileVisitResult.CONTINUE;
                 }
 
@@ -72,7 +98,15 @@ public final class FileUtil {
         } catch (IOException ignored) {
             // 부분 결과라도 반환한다.
         }
-        return total[0];
+        return new Sizes(total[0], total[1]);
+    }
+
+    /** 상대 경로를 구하지 못했으면(= 대상 밖) 안전하게 "바뀐 파일"로 본다. */
+    private static Sizes sizeOf(String relative, BasicFileAttributes attrs, ChangeFilter filter) {
+        long size = attrs.size();
+        boolean stored = filter == null || relative == null
+                || filter.stores(relative, size, attrs.lastModifiedTime().toMillis());
+        return new Sizes(size, stored ? size : 0L);
     }
 
     /**

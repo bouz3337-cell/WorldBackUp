@@ -1,7 +1,8 @@
 package io.github.yj.worldbackup.backup;
 
+import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -49,14 +50,6 @@ public final class Manifest {
         return new Manifest(new LinkedHashMap<>());
     }
 
-    public int size() {
-        return files.size();
-    }
-
-    public boolean isEmpty() {
-        return files.isEmpty();
-    }
-
     public Set<String> paths() {
         return Collections.unmodifiableSet(files.keySet());
     }
@@ -97,33 +90,44 @@ public final class Manifest {
         }
     }
 
-    public static Manifest parse(String text) {
-        Map<String, Stamp> parsed = new LinkedHashMap<>();
-        for (String line : text.split("\n")) {
-            if (line.isBlank()) continue;
-            int first = line.indexOf(' ');
-            if (first <= 0) continue;
-            int second = line.indexOf(' ', first + 1);
-            if (second <= first) continue;
-            try {
-                long size = Long.parseLong(line, 0, first, 10);
-                long modified = Long.parseLong(line, first + 1, second, 10);
-                parsed.put(line.substring(second + 1), new Stamp(size, modified));
-            } catch (NumberFormatException ignored) {
-                // 깨진 줄은 건너뛴다. 그 파일은 "바뀐 것"으로 취급되어 다시 저장될 뿐이다.
-            }
+    /**
+     * 한 줄을 해석해 넣는다. 형식이 깨진 줄은 조용히 건너뛴다.
+     * 그 파일은 "바뀐 것"으로 취급되어 다시 저장될 뿐이라 안전한 쪽으로 기운다.
+     */
+    private static void parseLine(String line, Map<String, Stamp> into) {
+        if (line.isBlank()) return;
+        int first = line.indexOf(' ');
+        if (first <= 0) return;
+        int second = line.indexOf(' ', first + 1);
+        if (second <= first) return;
+        try {
+            long size = Long.parseLong(line, 0, first, 10);
+            long modified = Long.parseLong(line, first + 1, second, 10);
+            into.put(line.substring(second + 1), new Stamp(size, modified));
+        } catch (NumberFormatException ignored) {
         }
-        return new Manifest(parsed);
     }
 
-    /** 아카이브 안에 들어 있는 매니페스트를 읽는다. 없으면(옛 버전 백업) 빈 결과. */
+    /**
+     * 아카이브 안에 들어 있는 매니페스트를 읽는다. 없으면(옛 버전 백업) 빈 결과.
+     *
+     * <p>{@link #writeTo(OutputStream)} 과 마찬가지로 한 줄씩 흘려 읽는다. 통째로 문자열에
+     * 담으면 파일이 수십만 개인 월드에서 수십 MB 짜리 문자열과 그것을 쪼갠 배열이 동시에
+     * 잡히는데, 차등 백업은 <b>매 주기</b> 이 메서드를 부른다.</p>
+     */
     public static Optional<Manifest> readFrom(Path archive) {
         try (ZipFile zip = new ZipFile(archive.toFile(), StandardCharsets.UTF_8)) {
             ZipEntry entry = zip.getEntry(ENTRY);
             if (entry == null) return Optional.empty();
-            try (InputStream in = zip.getInputStream(entry)) {
-                return Optional.of(parse(new String(in.readAllBytes(), StandardCharsets.UTF_8)));
+            Map<String, Stamp> parsed = new LinkedHashMap<>();
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(zip.getInputStream(entry), StandardCharsets.UTF_8), CHUNK_CHARS)) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    parseLine(line, parsed);
+                }
             }
+            return Optional.of(new Manifest(parsed));
         } catch (IOException e) {
             return Optional.empty();
         }

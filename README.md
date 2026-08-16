@@ -77,14 +77,119 @@ ID 자리에는 `#3` 같은 목록 번호나 `latest` 도 쓸 수 있습니다.
 - 복원 결과는 콘솔과 `plugins/WorldBackUp/last-restore.yml` 에 기록됩니다.
 
 > **자동 재시작 필수** — 플러그인은 서버 프로세스를 다시 켤 수 없습니다.
-> 호스팅 패널의 자동 재시작을 켜두거나, 시작 스크립트를 반복 실행 형태로 만들어 두세요.
->
-> ```bat
-> :start
-> java -Xms4G -Xmx4G -jar paper-26.2.jar nogui
-> timeout /t 5
-> goto start
-> ```
+> 호스팅 패널의 자동 재시작을 켜두거나, 아래 [무인 운영](#10-무인-자동-운영) 절의 래퍼를 쓰세요.
+
+## 10. 무인 자동 운영
+
+관리자가 콘솔을 보지 않는 환경을 위해 두 가지 안전장치가 들어 있습니다.
+
+**① 백업이 전멸하지 않습니다 (`retention.min-backups`)**
+
+접속자가 없으면 백업은 건너뛰지만 보관 정리는 계속 돕니다. 그래서 서버가 `max-age-days`
+보다 오래 놀면 백업이 **하나도 남지 않을 수** 있었습니다 (`keep-daily` 는 "최근 N일 안에
+만들어진 백업"만 지키는데 그 기간에 백업이 없고, 자동 백업은 `protect-manual` 대상도 아님).
+그 상태에서 누가 접속해 테러를 하면 되돌릴 곳이 없습니다.
+`min-backups` 는 어떤 정책으로도 그 아래로 내려가지 않는 하한선입니다.
+
+**② 복원이 실패하면 자동 작업이 멈춥니다**
+
+복원이 중간에 실패하면 `plugins/WorldBackUp/restore-failed-<시각>.yml` 이 생기고,
+이 파일이 있는 동안 **자동 백업과 보관 정리(`replaced/` 정리 포함)를 하지 않습니다.**
+그러지 않으면 반쯤 복원된 월드가 계속 백업되면서 멀쩡한 예전 백업이 정책에 밀려 사라집니다.
+
+- 수동 `/wb backup`, `/wb restore` 는 그대로 쓸 수 있습니다
+- `/wb status` 맨 위에 정지 상태가 표시됩니다
+- 월드를 확인한 뒤 그 파일을 지우고 `/wb reload` 하면 풀립니다
+- 이후 복원이 성공하면 표식에 `.resolved` 가 붙으며 자동으로 풀립니다
+
+**③ 서버 재시작 래퍼**
+
+`/wb confirm` 이후 서버는 스스로 꺼지므로, 누군가 다시 켜야 복원이 적용됩니다.
+
+<details>
+<summary>Windows (<code>run-server.ps1</code>)</summary>
+
+```powershell
+$ServerDir = $PSScriptRoot
+$JavaArgs  = @('-Xms4G','-Xmx4G','-jar','paper-26.2.jar','nogui')
+$StopFile  = Join-Path $ServerDir 'STOP'
+$DataDir   = Join-Path $ServerDir 'plugins\WorldBackUp'
+$crashes   = 0
+
+while ($true) {
+    if (Test-Path $StopFile) { Write-Host '[run] STOP 파일이 있어 종료합니다.'; break }
+
+    # 복원 예약이 걸린 채 꺼지는 것인지 미리 봐 둔다 (이건 정상 종료다)
+    $restorePending = Test-Path (Join-Path $DataDir 'pending-restore.yml')
+    $started = Get-Date
+    & java @JavaArgs
+    $ranFor = (Get-Date) - $started
+
+    if (Test-Path $StopFile) { break }
+
+    # 복원 실패 표식이 생겼으면 사람이 볼 때까지 멈춘다.
+    if (Get-ChildItem $DataDir -Filter 'restore-failed-*.yml' -ErrorAction SilentlyContinue) {
+        Write-Host '[run] 복원이 실패했습니다. 자동 재시작을 중단합니다. 월드를 확인하세요.'
+        break
+    }
+
+    if ($restorePending) { Write-Host '[run] 복원 적용을 위해 재시작합니다.'; $crashes = 0; continue }
+
+    if ($ranFor.TotalSeconds -lt 60) {
+        $crashes++
+        if ($crashes -ge 3) { Write-Host '[run] 크래시 루프로 판단해 멈춥니다.'; break }
+    } else { $crashes = 0 }
+
+    Write-Host '[run] 5초 후 재시작합니다.'
+    Start-Sleep -Seconds 5
+}
+```
+
+서버를 완전히 끄려면 `STOP` 파일을 만든 뒤 `/stop` 하세요.
+</details>
+
+<details>
+<summary>Linux (systemd)</summary>
+
+```ini
+[Unit]
+Description=Minecraft Paper
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=5          # 5분에 5회 넘게 죽으면 중단 (크래시 루프 방지)
+
+[Service]
+Type=simple
+User=minecraft
+WorkingDirectory=/srv/minecraft
+ExecStart=/usr/bin/java -Xms4G -Xmx4G -jar paper-26.2.jar nogui
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`Restart=always` 라 `/stop` 으로도 다시 켜집니다. 정말 끌 때는 `systemctl stop minecraft` 를 쓰세요.
+</details>
+
+**무인 운영 권장 설정**
+
+```yaml
+backup:
+  on-startup: true              # 재시작 후 상태를 한 번 남김
+  skip-if-no-players: true
+  directory: "D:/minecraft-backups"   # 절대 경로, 다른 물리 디스크
+retention:
+  min-backups: 5                # 0 으로 두지 마세요
+restore:
+  verify-archive: true
+  create-safety-backup: true
+```
+
+> 백업본을 다른 물리 디스크·다른 장비로 복사하는 것은 이 플러그인이 하지 않습니다.
+> 디스크 하나가 죽으면 월드와 백업이 함께 사라지므로, 백업 폴더를 외부로 옮기는 절차는
+> 별도로 두세요.
 
 ## 5. 설정 요약 (`config.yml`)
 
@@ -101,6 +206,7 @@ ID 자리에는 `#3` 같은 목록 번호나 `latest` 도 쓸 수 있습니다.
 | `targets.extra-paths` | `[]` | `plugins/LuckPerms` 등 추가 백업 경로 |
 | `targets.exclude` | 로그/캐시/lock | 백업 제외 glob 패턴 |
 | `retention.max-backups` | 48 | 보관 최대 개수 |
+| `retention.min-backups` | 5 | **최소 보관 개수.** 어떤 정책으로도 이 아래로 줄이지 않음 |
 | `retention.max-age-days` | 14 | 보관 최대 기간 |
 | `retention.keep-daily` | 7 | 최근 7일은 하루 1개씩 반드시 보존 |
 | `retention.protect-manual` | true | 수동·복원직전 백업을 자동 삭제에서 제외 |
@@ -131,6 +237,9 @@ backup:
   그 사이 삭제된 파일은 되살리지 않습니다.
 - 기준 백업은 딸린 차등본이 모두 정리되기 전까지 **자동 삭제되지 않습니다.**
   `/wb delete` 로 직접 지우려 해도 막히고, 함께 지우려면 `/wb delete <ID> cascade` 를 씁니다.
+  차등본을 압축하고 있는 동안에도 그 기준은 보관 정책·공간 확보·수동 삭제 어느 쪽으로도 지워지지 않습니다.
+- 디스크 여유 검사는 **이번에 실제로 저장할 용량** 기준입니다. 차등본 하나가 200MB 라면
+  월드 전체 크기가 아니라 그 200MB 로 판단하므로, 공간이 넉넉한데 백업이 거부되는 일이 없습니다.
 - 기준 백업이 사라진 차등본은 `/wb list` 에 `[손상]` 으로 뜨고 복원에 쓸 수 없습니다.
 - 복원 검증(`restore.verify-archive`)은 기준과 차등본 **양쪽**을 읽고, 파일 목록의 모든 항목이
   둘 중 어딘가에 실제로 있는지까지 확인합니다.
@@ -190,6 +299,9 @@ retention:
 - 다음 부팅 시 플러그인 `onLoad()`(월드 로드 직전)에서
   ① zip 무결성 검사 → ② 대상 폴더 비우기 → ③ 압축 해제 순으로 진행합니다.
   ①에서 실패하면 **기존 월드를 전혀 건드리지 않고** 중단합니다.
+- 백업에 내용이 없는 경로(백업 시점에 비어 있던 `extra-paths` 폴더 등)는 **비우지 않고 건너뜁니다.**
+  비우기만 하고 채우지 않으면 그 폴더가 사라지기 때문입니다. 콘솔에 어떤 경로를 건너뛰었는지 남고,
+  모든 대상에 내용이 없을 때만 복원을 거부합니다.
 - 복원이 중간에 끊기면 `restore-failed-<시각>.yml` 이 생기고 **재시도 루프에 빠지지 않습니다**.
   이 경우 서버를 끄고 `replaced/` 폴더를 이용해 수동 확인이 필요합니다.
 

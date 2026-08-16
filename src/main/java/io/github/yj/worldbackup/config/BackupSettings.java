@@ -36,6 +36,7 @@ public final class BackupSettings {
 
     // retention
     private final int maxBackups;
+    private final int minBackups;
     private final int maxAgeDays;
     private final int keepDaily;
     private final boolean protectManual;
@@ -50,7 +51,6 @@ public final class BackupSettings {
     private final boolean verifyArchive;
     private final int confirmTimeoutSeconds;
     private final List<String> preservePatterns;
-    private final GlobMatcher preserve;
 
     private final Path serverRoot;
 
@@ -89,6 +89,7 @@ public final class BackupSettings {
         this.exclude = new GlobMatcher(excludes);
 
         this.maxBackups = Math.max(0, cfg.getInt("retention.max-backups", 48));
+        this.minBackups = Math.max(0, cfg.getInt("retention.min-backups", 5));
         this.maxAgeDays = Math.max(0, cfg.getInt("retention.max-age-days", 14));
         this.keepDaily = Math.max(0, cfg.getInt("retention.keep-daily", 7));
         this.protectManual = cfg.getBoolean("retention.protect-manual", true);
@@ -104,7 +105,6 @@ public final class BackupSettings {
         List<String> preserveList = cfg.getStringList("restore.preserve");
         if (preserveList.isEmpty()) preserveList = List.of("**/session.lock");
         this.preservePatterns = List.copyOf(preserveList);
-        this.preserve = new GlobMatcher(this.preservePatterns);
     }
 
     public static BackupSettings load(FileConfiguration cfg, Path dataFolder, Path serverRoot) {
@@ -168,6 +168,15 @@ public final class BackupSettings {
 
     public int maxBackups() { return maxBackups; }
 
+    /**
+     * 어떤 보관 정책으로도 이 개수 아래로는 줄이지 않는다. (0 = 하한 없음)
+     *
+     * <p>무인 서버가 오래 놀면 나이 정책 하나로 백업이 <b>전멸</b>할 수 있다. 그 사이
+     * {@code keep-daily} 는 "최근 N일 안의 백업"만 지키는데 그 기간에 만들어진 백업이 없고,
+     * 자동 백업은 {@code protect-manual} 대상도 아니기 때문이다.</p>
+     */
+    public int minBackups() { return minBackups; }
+
     public int maxAgeDays() { return maxAgeDays; }
 
     public int keepDaily() { return keepDaily; }
@@ -191,8 +200,6 @@ public final class BackupSettings {
     public int confirmTimeoutSeconds() { return confirmTimeoutSeconds; }
 
     public List<String> preservePatterns() { return preservePatterns; }
-
-    public GlobMatcher preserve() { return preserve; }
 
     public Path serverRoot() { return serverRoot; }
 }

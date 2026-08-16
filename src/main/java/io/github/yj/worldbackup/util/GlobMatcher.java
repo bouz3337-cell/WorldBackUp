@@ -14,14 +14,26 @@ import java.util.regex.Pattern;
  */
 public final class GlobMatcher {
 
-    private final List<Pattern> patterns = new ArrayList<>();
+    /**
+     * 패턴 전부를 하나로 합친 정규식. 없으면 null.
+     *
+     * <p>패턴마다 {@link Pattern} 을 따로 두고 순회하면 파일 하나를 검사할 때마다 패턴 수만큼
+     * {@code Matcher} 가 생긴다. 기본 설정만 해도 10개고, 이 검사는 백업 대상 <b>모든 파일</b>에
+     * 대해 용량 측정과 압축에서 각각 한 번씩 돈다. 교대(alternation) 하나로 합치면 결과는 그대로
+     * 두면서 그 반복을 한 번으로 줄인다.</p>
+     */
+    private final Pattern combined;
 
     public GlobMatcher(Collection<String> globs) {
-        if (globs == null) return;
-        for (String glob : globs) {
-            if (glob == null || glob.isBlank()) continue;
-            patterns.add(Pattern.compile(toRegex(glob.trim()), Pattern.CASE_INSENSITIVE));
+        List<String> bodies = new ArrayList<>();
+        if (globs != null) {
+            for (String glob : globs) {
+                if (glob == null || glob.isBlank()) continue;
+                bodies.add("(?:" + toRegexBody(glob.trim()) + ")");
+            }
         }
+        this.combined = bodies.isEmpty() ? null
+                : Pattern.compile("^(?:" + String.join("|", bodies) + ")$", Pattern.CASE_INSENSITIVE);
     }
 
     public static GlobMatcher empty() {
@@ -29,16 +41,13 @@ public final class GlobMatcher {
     }
 
     public boolean isEmpty() {
-        return patterns.isEmpty();
+        return combined == null;
     }
 
     /** 파일의 상대 경로가 패턴 중 하나에 매칭되는지 검사한다. */
     public boolean matchesFile(String relativePath) {
-        String normalized = relativePath.replace('\\', '/');
-        for (Pattern pattern : patterns) {
-            if (pattern.matcher(normalized).matches()) return true;
-        }
-        return false;
+        if (combined == null) return false;
+        return combined.matcher(relativePath.replace('\\', '/')).matches();
     }
 
     /**
@@ -51,8 +60,9 @@ public final class GlobMatcher {
         return matchesFile(normalized) || matchesFile(normalized + "/");
     }
 
-    static String toRegex(String glob) {
-        StringBuilder sb = new StringBuilder("^");
+    /** glob 하나를 <b>앵커 없는</b> 정규식 조각으로 바꾼다. 앵커는 합칠 때 한 번만 붙인다. */
+    static String toRegexBody(String glob) {
+        StringBuilder sb = new StringBuilder();
         int braceDepth = 0;
         for (int i = 0; i < glob.length(); i++) {
             char c = glob.charAt(i);
@@ -89,6 +99,9 @@ public final class GlobMatcher {
                 default -> sb.append(c);
             }
         }
-        return sb.append('$').toString();
+        // 닫히지 않은 '{' 는 config.yml 오타에서 나온다. 그대로 두면 정규식이 깨져
+        // 설정 로딩 자체가 예외로 죽으므로, 여기서 닫아 평범한 교대로 취급한다.
+        while (braceDepth-- > 0) sb.append(')');
+        return sb.toString();
     }
 }

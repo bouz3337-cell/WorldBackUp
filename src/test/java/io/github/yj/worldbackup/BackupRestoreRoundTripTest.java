@@ -134,6 +134,62 @@ class BackupRestoreRoundTripTest {
         }
     }
 
+    /**
+     * 복원이 실패하면 사람이 볼 표식을 남겨야 한다.
+     * 이게 없으면 무인 서버는 반쯤 복원된 월드를 계속 백업하다 멀쩡한 백업을 밀어낸다.
+     */
+    @Test
+    void failedRestoreLeavesAMarkerThatHoldsAutomaticWork() throws Exception {
+        Path serverRoot = tmp.resolve("server12");
+        Path dataFolder = serverRoot.resolve("plugins/WorldBackUp");
+        Files.createDirectories(dataFolder);
+
+        assertTrue(RestoreApplier.failureMarkers(dataFolder).isEmpty(), "처음에는 표식이 없다");
+
+        // 존재하지 않는 아카이브 -> 복원 실패
+        new PendingRestore("missing", tmp.resolve("nowhere.zip"), null, "tester",
+                System.currentTimeMillis(), false, true, List.of(), List.of("world")).write(dataFolder);
+        RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
+
+        List<Path> markers = RestoreApplier.failureMarkers(dataFolder);
+        assertEquals(1, markers.size(), "복원 실패 표식이 남아야 한다");
+        assertTrue(markers.get(0).getFileName().toString().startsWith(RestoreApplier.FAILURE_PREFIX));
+        assertFalse(Files.exists(PendingRestore.processingFile(dataFolder)), "재시도 루프에 빠지지 않아야 한다");
+    }
+
+    /** 이후 복원이 성공하면 정지가 풀려야 한다. 기록 자체는 남는다. */
+    @Test
+    void successfulRestoreReleasesAnEarlierFailureHold() throws Exception {
+        Path serverRoot = tmp.resolve("server13");
+        Path world = serverRoot.resolve("world");
+        Path dataFolder = serverRoot.resolve("plugins/WorldBackUp");
+        Path backupDir = dataFolder.resolve("backups");
+
+        write(world.resolve("level.dat"), "LEVEL");
+        write(serverRoot.resolve("server.properties"), "motd=hello");
+
+        BackupRepository repository = new BackupRepository(backupDir, LOG);
+        repository.ensureDirectory();
+        BackupEntry entry = createBackup(repository, serverRoot, world, backupDir);
+
+        // 지난번 복원이 실패해 정지된 상태를 재현한다.
+        Path stale = dataFolder.resolve(RestoreApplier.FAILURE_PREFIX + "20260101-000000.yml");
+        Files.writeString(stale, "id: broken\n", StandardCharsets.UTF_8);
+        assertEquals(1, RestoreApplier.failureMarkers(dataFolder).size());
+
+        write(world.resolve("level.dat"), "GRIEFED");
+        new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
+                false, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
+                .write(dataFolder);
+        RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
+
+        assertEquals("LEVEL", read(world.resolve("level.dat")), "복원은 성공해야 한다");
+        assertTrue(RestoreApplier.failureMarkers(dataFolder).isEmpty(), "정지가 풀려야 한다");
+        assertFalse(Files.exists(stale), "표식은 해제 꼬리표가 붙어 이름이 바뀐다");
+        assertTrue(Files.isRegularFile(dataFolder.resolve(stale.getFileName() + ".resolved")),
+                "기록 자체는 남아야 한다");
+    }
+
     @Test
     void zipSlipEntriesAreRejected() throws Exception {
         Path serverRoot = tmp.resolve("server3");
@@ -214,6 +270,47 @@ class BackupRestoreRoundTripTest {
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
         assertEquals("LEVEL", read(world.resolve("level.dat")), "월드가 그대로 남아야 한다");
+    }
+
+    /**
+     * 백업에 없는 경로가 섞여 있어도, 데이터가 있는 경로는 정상적으로 복원되어야 한다.
+     *
+     * <p>백업 시점에 비어 있던 {@code extra-paths} 폴더 하나 때문에 월드 복원까지 막히면
+     * 정작 필요할 때 롤백을 못 한다. 반대로 그 경로를 비우기만 하고 채우지 않아도 안 된다.</p>
+     */
+    @Test
+    void rootWithoutDataIsSkippedInsteadOfBlockingTheWholeRestore() throws Exception {
+        Path serverRoot = tmp.resolve("server9");
+        Path world = serverRoot.resolve("world");
+        Path dataFolder = serverRoot.resolve("plugins/WorldBackUp");
+        Files.createDirectories(dataFolder);
+
+        write(world.resolve("level.dat"), "LEVEL");
+        write(serverRoot.resolve("config/keep-me.yml"), "설정은 그대로 남아야 한다");
+
+        // world 데이터만 들어 있고 config/ 는 비어 있던 백업
+        Path archive = tmp.resolve("world-only.zip");
+        try (var zip = new java.util.zip.ZipOutputStream(Files.newOutputStream(archive), StandardCharsets.UTF_8)) {
+            zip.putNextEntry(new java.util.zip.ZipEntry("world/level.dat"));
+            zip.write("LEVEL-BACKED-UP".getBytes(StandardCharsets.UTF_8));
+            zip.closeEntry();
+            zip.putNextEntry(new java.util.zip.ZipEntry("config/"));   // 빈 폴더 엔트리뿐
+            zip.closeEntry();
+        }
+
+        write(world.resolve("level.dat"), "GRIEFED");
+
+        new PendingRestore("partial", archive, null, "tester", System.currentTimeMillis(),
+                false, true, List.of(), List.of("world", "config")).write(dataFolder);
+        RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
+
+        assertEquals("LEVEL-BACKED-UP", read(world.resolve("level.dat")), "데이터가 있는 경로는 복원되어야 한다");
+        assertEquals("설정은 그대로 남아야 한다", read(serverRoot.resolve("config/keep-me.yml")),
+                "백업에 내용이 없는 경로는 비우지 않고 그대로 둔다");
+
+        var report = org.bukkit.configuration.file.YamlConfiguration
+                .loadConfiguration(dataFolder.resolve(PendingRestore.REPORT_NAME).toFile());
+        assertTrue(report.getBoolean("success"), "일부 경로가 비어 있어도 복원 자체는 성공해야 한다");
     }
 
     /**
@@ -315,6 +412,74 @@ class BackupRestoreRoundTripTest {
         assertTrue(Files.isDirectory(world.resolve("datapacks")), "유지된 빈 폴더는 복원되어야 한다");
         assertFalse(Files.exists(world.resolve("old_poi")),
                 "차등 시점에 삭제된 빈 폴더가 기준 백업에서 되살아나면 안 된다");
+    }
+
+    /**
+     * 폴더가 zip 에 남는 유일한 경로는 그 안의 파일 엔트리다.
+     * 그래서 <b>제외 패턴에 전부 걸린 폴더</b>도 빈 폴더와 똑같이 따로 기록해 줘야 한다.
+     * 그러지 않으면 복원 후 그 폴더가 통째로 사라진다.
+     */
+    @Test
+    void directoryWhoseFilesAreAllExcludedStillSurvivesRestore() throws Exception {
+        Path serverRoot = tmp.resolve("server10");
+        Path world = serverRoot.resolve("world");
+        Path dataFolder = serverRoot.resolve("plugins/WorldBackUp");
+        Path backupDir = dataFolder.resolve("backups");
+
+        write(world.resolve("level.dat"), "LEVEL");
+        write(serverRoot.resolve("server.properties"), "motd=hello");
+        Files.createDirectories(world.resolve("empty_dir"));            // 진짜 빈 폴더
+        write(world.resolve("locks_only/session.lock"), "LOCK");        // 내용이 전부 제외 대상
+
+        BackupRepository repository = new BackupRepository(backupDir, LOG);
+        repository.ensureDirectory();
+        BackupEntry entry = createBackup(repository, serverRoot, world, backupDir);
+
+        assertTrue(zipContains(entry.archive(), "world/empty_dir/"), "빈 폴더는 기록되어야 한다");
+        assertTrue(zipContains(entry.archive(), "world/locks_only/"),
+                "제외 파일만 든 폴더도 기록되어야 한다");
+        assertFalse(zipContains(entry.archive(), "world/"),
+                "내용이 있는 폴더는 굳이 엔트리를 만들지 않는다");
+
+        FileUtil.deleteRecursively(world);
+
+        new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
+                false, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
+                .write(dataFolder);
+        RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
+
+        assertEquals("LEVEL", read(world.resolve("level.dat")));
+        assertTrue(Files.isDirectory(world.resolve("empty_dir")), "빈 폴더가 복원되어야 한다");
+        assertTrue(Files.isDirectory(world.resolve("locks_only")),
+                "제외 파일만 있던 폴더도 복원되어야 한다");
+    }
+
+    /** 매니페스트를 한 줄씩 흘려 읽도록 바꿨으므로, 왕복이 정확한지 확인한다. */
+    @Test
+    void manifestSurvivesAStreamingRoundTrip() throws Exception {
+        Path serverRoot = tmp.resolve("server11");
+        Path world = serverRoot.resolve("world");
+        Path backupDir = serverRoot.resolve("plugins/WorldBackUp/backups");
+
+        write(world.resolve("level.dat"), "LEVEL");
+        write(world.resolve("region/공백 있는 이름.mca"), "SPACED");  // 경로에 공백·한글
+        write(serverRoot.resolve("server.properties"), "motd=hello");
+        for (int i = 0; i < 500; i++) {                                // 여러 청크에 걸치도록
+            write(world.resolve("playerdata/uuid-" + i + ".dat"), "P" + i);
+        }
+
+        BackupRepository repository = new BackupRepository(backupDir, LOG);
+        repository.ensureDirectory();
+        BackupEntry entry = createBackup(repository, serverRoot, world, backupDir);
+
+        Manifest manifest = Manifest.readFrom(entry.archive()).orElseThrow();
+        assertEquals(entry.fileCount(), manifest.paths().size(), "모든 파일이 목록에 있어야 한다");
+        assertTrue(manifest.contains("world/region/공백 있는 이름.mca"), "공백이 든 경로도 살아야 한다");
+        assertTrue(manifest.contains("world/playerdata/uuid-499.dat"));
+
+        long size = Files.size(world.resolve("level.dat"));
+        long modified = Files.getLastModifiedTime(world.resolve("level.dat")).toMillis();
+        assertTrue(manifest.unchanged("world/level.dat", size, modified), "크기·수정 시각이 보존되어야 한다");
     }
 
     /** 기준 백업이 사라진 차등 백업은 목록에서 손상으로 표시되어야 한다. */

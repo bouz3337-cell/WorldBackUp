@@ -9,7 +9,6 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
-import java.nio.file.DirectoryStream;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,6 +16,8 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.List;
 import java.util.function.BiFunction;
 import java.util.function.Consumer;
@@ -46,15 +47,14 @@ public final class Archiver {
      * @param originalBytes 스냅샷 전체 크기(기준 백업에서 재사용한 파일 포함)
      * @param fileCount     스냅샷 전체 파일 수
      * @param storedCount   이번 아카이브에 실제로 저장한 파일 수
-     * @param manifest      이번 스냅샷의 전체 파일 목록
+     * @param storedBytes   이번 아카이브에 실제로 저장한 원본 바이트(압축 전)
      */
     public record Result(long archiveBytes,
                          long originalBytes,
                          int fileCount,
                          int skippedCount,
                          int storedCount,
-                         long storedBytes,
-                         Manifest manifest) {
+                         long storedBytes) {
     }
 
     /**
@@ -131,7 +131,7 @@ public final class Archiver {
 
         long archiveBytes = Files.size(archive);
         return new Result(archiveBytes, counter.originalBytes, counter.files, counter.skipped,
-                counter.stored, counter.storedBytes, counter.manifest);
+                counter.stored, counter.storedBytes);
     }
 
     private static void writeTextEntry(ZipOutputStream zip, String name, String text) throws IOException {
@@ -158,20 +158,26 @@ public final class Archiver {
                                       Counter counter,
                                       Logger log) throws IOException {
         Files.walkFileTree(root, new SimpleFileVisitor<>() {
+
+            /**
+             * 폴더별로 "이 아래에 zip 엔트리가 하나라도 쓰였는지" 를 센다.
+             *
+             * <p>폴더가 zip 에 남는 유일한 경로는 그 안의 파일 엔트리다. 그래서 아무것도 쓰이지
+             * 않은 폴더는 복원 때 되살아나지 못한다. 예전에는 {@code preVisitDirectory} 에서
+             * 폴더를 직접 열어 비어 있는지만 확인했는데, 그러면 <b>제외 패턴에 전부 걸린 폴더</b>
+             * (예: {@code *.lock} 만 들어 있는 폴더)를 "비어 있지 않다" 고 보고 그냥 지나쳐
+             * 복원 후 폴더가 사라졌다. 다 훑고 난 뒤에 판단하면 두 경우가 한 번에 해결되고,
+             * 폴더마다 따로 열던 비용도 없어진다.</p>
+             */
+            private final Deque<int[]> written = new ArrayDeque<>();
+
             @Override
             public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
                 String relative = FileUtil.relativize(serverRoot, dir);
                 if (relative != null && exclude.matchesDirectory(relative)) {
                     return FileVisitResult.SKIP_SUBTREE;
                 }
-                // 비어 있는 폴더는 파일이 하나도 없어 zip 에 흔적이 남지 않는다. 엔트리를 직접 넣어 준다.
-                if (relative != null && isEmptyDirectory(dir)) {
-                    try {
-                        zip.putNextEntry(new ZipEntry(relative + "/"));
-                        zip.closeEntry();
-                    } catch (IOException ignored) {
-                    }
-                }
+                written.push(new int[]{0});
                 return FileVisitResult.CONTINUE;
             }
 
@@ -182,10 +188,32 @@ public final class Archiver {
                 if (!attrs.isRegularFile()) return FileVisitResult.CONTINUE;
                 try {
                     addFile(zip, file, relative, attrs, base, buffer, counter, log);
+                    markWritten();
                 } catch (IOException e) {
                     counter.skipped++;
                     log.log(Level.WARNING, "[백업] 파일을 읽지 못해 건너뜁니다: " + relative + " (" + e.getMessage() + ")");
                 }
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult postVisitDirectory(Path dir, IOException exc) {
+                boolean hasContent = written.pop()[0] > 0;
+                if (!hasContent) {
+                    String relative = FileUtil.relativize(serverRoot, dir);
+                    if (relative != null) {
+                        try {
+                            zip.putNextEntry(new ZipEntry(relative + "/"));
+                            zip.closeEntry();
+                            hasContent = true;
+                        } catch (IOException e) {
+                            log.warning("[백업] 빈 폴더를 기록하지 못했습니다: " + relative
+                                    + " (" + e.getMessage() + ")");
+                        }
+                    }
+                }
+                // 하위에 뭔가 남겼다면 상위 폴더는 그 엔트리 덕에 복원되므로 따로 적을 필요가 없다.
+                if (hasContent) markWritten();
                 return FileVisitResult.CONTINUE;
             }
 
@@ -195,15 +223,12 @@ public final class Archiver {
                 log.warning("[백업] 접근할 수 없는 파일: " + file + " (" + exc.getMessage() + ")");
                 return FileVisitResult.CONTINUE;
             }
-        });
-    }
 
-    private static boolean isEmptyDirectory(Path dir) {
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
-            return !stream.iterator().hasNext();
-        } catch (IOException e) {
-            return false;
-        }
+            private void markWritten() {
+                int[] parent = written.peek();
+                if (parent != null) parent[0]++;
+            }
+        });
     }
 
     /**

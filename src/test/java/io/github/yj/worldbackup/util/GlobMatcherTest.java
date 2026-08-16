@@ -63,4 +63,35 @@ class GlobMatcherTest {
         assertTrue(matcher.isEmpty());
         assertFalse(matcher.matchesFile("world/level.dat"));
     }
+
+    /** 여러 패턴을 정규식 하나로 합치므로, 각 패턴이 서로를 침범하지 않는지 확인한다. */
+    @Test
+    void everyPatternStaysIndependentWhenCombined() {
+        GlobMatcher matcher = new GlobMatcher(List.of(
+                "**/session.lock",
+                "plugins/*.jar",
+                "**/*.{log,tmp}",
+                "data/a,b.txt"));
+
+        assertTrue(matcher.matchesFile("world/nether/session.lock"));
+        assertTrue(matcher.matchesFile("plugins/Essentials.jar"));
+        assertTrue(matcher.matchesFile("world/logs/latest.log"));
+        assertTrue(matcher.matchesFile("data/a,b.txt"));
+
+        // 한 패턴의 조각이 다른 패턴과 뒤섞여 넓어지면 안 된다.
+        assertFalse(matcher.matchesFile("plugins/nested/Essentials.jar"));
+        assertFalse(matcher.matchesFile("world/level.dat"));
+        assertFalse(matcher.matchesFile("data/a.txt"));
+        assertFalse(matcher.matchesFile("session.lock.bak"));
+    }
+
+    /** config.yml 오타 하나로 설정 로딩 전체가 예외로 죽으면 안 된다. */
+    @Test
+    void unclosedBraceDoesNotBreakTheWholeMatcher() {
+        GlobMatcher matcher = new GlobMatcher(List.of("**/*.{log,tmp", "**/session.lock"));
+
+        assertTrue(matcher.matchesFile("world/a.log"));
+        assertTrue(matcher.matchesFile("world/session.lock"), "뒤따르는 정상 패턴도 살아 있어야 한다");
+        assertFalse(matcher.matchesFile("world/a.dat"));
+    }
 }

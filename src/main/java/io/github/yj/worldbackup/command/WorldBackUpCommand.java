@@ -279,6 +279,11 @@ public final class WorldBackUpCommand {
             Msg.send(sender, "<red>보호된 백업입니다. <white>/wb unlock " + entry.id() + "</white> 후 삭제하세요.</red>");
             return;
         }
+        if (plugin.repository().isPinned(entry)) {
+            Msg.send(sender, "<red>지금 만들어지는 차등 백업이 이 백업을 기준으로 삼고 있습니다.</red>");
+            Msg.send(sender, "<gray>백업이 끝난 뒤 다시 시도하세요.</gray>");
+            return;
+        }
 
         List<BackupEntry> all = plugin.repository().list();
         List<BackupEntry> dependents = plugin.repository().dependents(all, entry.id());
@@ -354,6 +359,11 @@ public final class WorldBackUpCommand {
         long totalBytes = entries.stream().mapToLong(BackupEntry::archiveBytes).sum();
 
         Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>WorldBackUp 상태</aqua> <dark_gray>─────</dark_gray>");
+        if (plugin.restoreFailureHold()) {
+            Msg.sendRaw(sender, " <red><bold>복원 실패 기록이 남아 자동 작업이 멈춰 있습니다.</bold></red>");
+            Msg.sendRaw(sender, " <gray>plugins/WorldBackUp/restore-failed-*.yml 을 확인하고 지운 뒤 "
+                    + "<white>/wb reload</white> 하세요.</gray>");
+        }
         Msg.sendRaw(sender, " <gray>자동 백업:</gray> " + (settings.enabled()
                 ? "<green>켜짐</green> <dark_gray>(" + settings.intervalMinutes() + "분 주기)</dark_gray>"
                 : "<red>꺼짐</red>"));

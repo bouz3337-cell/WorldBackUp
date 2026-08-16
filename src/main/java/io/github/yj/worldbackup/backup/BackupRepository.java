@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -34,6 +35,22 @@ public final class BackupRepository {
     private final Path directory;
     private final Logger log;
 
+    /**
+     * 지금 진행 중인 백업이 기준으로 삼고 있는 전체 백업의 id.
+     *
+     * <p>차등 백업을 만드는 동안에는 그 기준이 사라지면 안 된다. 압축이 끝난 뒤에야 사이드카가
+     * 생겨 {@link #dependents} 에 잡히므로, 그 사이는 딸린 차등본이 하나도 없는 것처럼 보여
+     * 보관 정책이나 공간 확보 로직이 태연히 지워 버릴 수 있다. 그렇게 되면 방금 만든 차등본은
+     * 태어나자마자 복원 불가가 된다. 백업은 한 번에 하나만 도므로 하나만 붙잡으면 충분하다.</p>
+     */
+    private volatile String pinnedId;
+
+    /** {@link #list()} 캐시 유효 시간. 짧게 잡아 밖에서 폴더를 건드려도 금방 따라잡는다. */
+    private static final long LIST_CACHE_MILLIS = 3_000L;
+
+    private volatile List<BackupEntry> cachedList;
+    private volatile long cachedAt;
+
     public BackupRepository(Path directory, Logger log) {
         this.directory = directory;
         this.log = log;
@@ -43,12 +60,50 @@ public final class BackupRepository {
         return directory;
     }
 
+    /** 이 백업을 삭제 대상에서 완전히 제외한다. (진행 중인 차등 백업의 기준) */
+    public void pin(String id) {
+        this.pinnedId = id;
+    }
+
+    public void unpin() {
+        this.pinnedId = null;
+    }
+
+    public boolean isPinned(BackupEntry entry) {
+        String pinned = pinnedId;
+        return pinned != null && pinned.equals(entry.id());
+    }
+
     public void ensureDirectory() throws IOException {
         Files.createDirectories(directory);
     }
 
-    /** 최신 백업이 앞에 오도록 정렬된 목록. */
+    /**
+     * 최신 백업이 앞에 오도록 정렬된 목록.
+     *
+     * <p>한 번 훑는 데 백업마다 파일 크기·보호 마커 조회와 YAML 파싱이 따르고, 사이드카가
+     * 없으면 zip 까지 연다. 그런데 {@code /wb list}·{@code /wb status}·{@code /wb info}·
+     * 탭 완성이 모두 <b>메인 스레드</b>에서 이걸 부르고, 명령 하나가 여러 번 부르기도 한다.
+     * 짧은 캐시를 두어 그 반복을 걷어낸다. 저장소를 거치는 변경은 모두 캐시를 버리므로,
+     * 뒤처질 수 있는 것은 플러그인 밖에서 백업 폴더를 직접 건드린 경우뿐이다.</p>
+     */
     public List<BackupEntry> list() {
+        List<BackupEntry> cached = cachedList;
+        if (cached != null && System.currentTimeMillis() - cachedAt < LIST_CACHE_MILLIS) {
+            return cached;
+        }
+        List<BackupEntry> fresh = List.copyOf(scan());
+        cachedList = fresh;
+        cachedAt = System.currentTimeMillis();
+        return fresh;
+    }
+
+    /** 저장소를 거친 변경 뒤에는 반드시 호출한다. */
+    private void invalidate() {
+        cachedList = null;
+    }
+
+    private List<BackupEntry> scan() {
         List<BackupEntry> entries = new ArrayList<>();
         if (!Files.isDirectory(directory)) return entries;
         try (Stream<Path> stream = Files.list(directory)) {
@@ -86,18 +141,6 @@ public final class BackupRepository {
     public Optional<BackupEntry> base(BackupEntry entry) {
         if (!entry.isDifferential()) return Optional.empty();
         return list().stream().filter(e -> e.id().equals(entry.baseId())).findFirst();
-    }
-
-    /** 차등 백업의 기준으로 쓸 수 있는 가장 최근 전체 백업. */
-    public Optional<BackupEntry> newestFullBackup() {
-        return list().stream()
-                .filter(BackupEntry::complete)
-                .filter(entry -> !entry.isDifferential())
-                .findFirst();
-    }
-
-    public long totalBytes() {
-        return list().stream().mapToLong(BackupEntry::archiveBytes).sum();
     }
 
     /**
@@ -230,6 +273,7 @@ public final class BackupRepository {
         } catch (IOException e) {
             log.log(Level.WARNING, "백업 메타데이터를 저장하지 못했습니다: " + entry.id(), e);
         }
+        invalidate();
     }
 
     /**
@@ -246,13 +290,19 @@ public final class BackupRepository {
             }
         } catch (IOException e) {
             log.log(Level.WARNING, "백업 보호 상태를 저장하지 못했습니다: " + entry.id(), e);
+            invalidate(); // 마커가 일부만 남았을 수 있으니 다시 읽게 한다
             return false;
         }
-        writeMeta(entry.withLocked(locked));
+        writeMeta(entry.withLocked(locked)); // 여기서 캐시가 버려진다
         return true;
     }
 
     public boolean delete(BackupEntry entry) {
+        // 마지막 방어선. 정책이든 수동이든, 지금 만들어지는 차등본의 기준은 지우지 않는다.
+        if (isPinned(entry)) {
+            log.warning("[백업] 진행 중인 차등 백업의 기준이라 삭제하지 않았습니다: " + entry.id());
+            return false;
+        }
         boolean ok = true;
         try {
             Files.deleteIfExists(entry.archive());
@@ -268,6 +318,7 @@ public final class BackupRepository {
             Files.deleteIfExists(entry.lockFile());
         } catch (IOException ignored) {
         }
+        invalidate();
         return ok;
     }
 
@@ -309,6 +360,7 @@ public final class BackupRepository {
             } catch (IOException ignored) {
             }
         }
+        if (removed > 0) invalidate();
         return removed;
     }
 
@@ -336,12 +388,23 @@ public final class BackupRepository {
 
         List<BackupEntry> deletable = new ArrayList<>();
         for (BackupEntry entry : all) {
+            if (isPinned(entry)) continue; // 진행 중인 차등 백업의 기준
             if (entry.protectedFrom(settings.protectManual())) continue;
             if (keep.contains(entry.id())) continue;
             deletable.add(entry);
         }
 
-        List<BackupEntry> toDelete = new ArrayList<>();
+        // 아래 선택 과정은 "이미 지우기로 했나" 를 수없이 되묻는다. 선형 탐색하는 List 대신
+        // 순서를 지키는 Set 을 쓴다. 기준-차등 관계도 매번 전체를 훑는 대신 한 번만 모아 둔다.
+        Set<BackupEntry> toDelete = new LinkedHashSet<>();
+        Map<String, List<BackupEntry>> dependentsByBase = new HashMap<>();
+        Map<String, BackupEntry> byId = new HashMap<>();
+        for (BackupEntry entry : all) {
+            byId.put(entry.id(), entry);
+            if (entry.isDifferential()) {
+                dependentsByBase.computeIfAbsent(entry.baseId(), key -> new ArrayList<>()).add(entry);
+            }
+        }
 
         if (settings.maxAgeDays() > 0) {
             Instant cutoff = Instant.now().minusSeconds(settings.maxAgeDays() * 86400L);
@@ -355,20 +418,19 @@ public final class BackupRepository {
         if (settings.maxProtected() > 0) {
             List<BackupEntry> autoProtected = new ArrayList<>();
             for (BackupEntry entry : all) {
-                if (entry.explicitlyLocked()) continue;
+                if (entry.explicitlyLocked() || isPinned(entry)) continue;
                 if (entry.protectedFrom(settings.protectManual())) autoProtected.add(entry);
             }
             for (int i = autoProtected.size() - 1; i >= settings.maxProtected(); i--) {
-                BackupEntry entry = autoProtected.get(i);
-                if (!toDelete.contains(entry)) toDelete.add(entry);
+                toDelete.add(autoProtected.get(i));
             }
         }
 
         // 차등 백업이 남아 있는 전체 백업은 지울 수 없다. 기준이 사라지면 그 차등 백업들이
         // 통째로 복원 불가능해지기 때문이다. 딸린 차등 백업이 모두 정리된 뒤에 함께 사라진다.
-        List<BackupEntry> heldBack = new ArrayList<>();
+        Set<BackupEntry> heldBack = new LinkedHashSet<>();
         toDelete.removeIf(entry -> {
-            if (blockingDependent(entry, all, toDelete) == null) return false;
+            if (blockingDependent(entry, dependentsByBase, toDelete) == null) return false;
             heldBack.add(entry);
             return true;
         });
@@ -385,8 +447,8 @@ public final class BackupRepository {
                 for (int i = deletable.size() - 1; i >= 0 && remaining > settings.maxBackups(); i--) {
                     BackupEntry entry = deletable.get(i);
                     if (toDelete.contains(entry)) continue;
-                    if (blockingDependent(entry, all, toDelete) != null) {
-                        if (!heldBack.contains(entry)) heldBack.add(entry);
+                    if (blockingDependent(entry, dependentsByBase, toDelete) != null) {
+                        heldBack.add(entry);
                         continue;
                     }
                     toDelete.add(entry);
@@ -396,10 +458,12 @@ public final class BackupRepository {
             }
         }
 
+        rescueToMinimum(settings, all, byId, toDelete);
+
         // 최종 결과가 정해진 뒤에 한 번만 알린다. (위 루프는 같은 항목을 여러 번 검사한다)
         for (BackupEntry base : heldBack) {
             if (toDelete.contains(base)) continue;
-            String holder = blockingDependent(base, all, toDelete);
+            String holder = blockingDependent(base, dependentsByBase, toDelete);
             if (holder != null) {
                 log.info("[백업] 차등 백업 " + holder + " 의 기준이라 " + base.id() + " 는 남겨 둡니다.");
             }
@@ -421,6 +485,53 @@ public final class BackupRepository {
     }
 
     /**
+     * 삭제 목록에서 최신 백업부터 되살려 최소 보관 개수를 채운다.
+     *
+     * <p>모든 정책을 통과한 <b>마지막 안전망</b>이다. 접속자가 없는 서버는 백업을 건너뛰기만
+     * 하는데 보관 정리는 계속 돌기 때문에, {@code max-age-days} 하나로 백업이 전멸할 수 있다.
+     * {@code keep-daily} 는 "최근 N일 안에 만들어진 백업"만 지키므로 그 기간에 백업이 없으면
+     * 아무도 지키지 못하고, 자동 백업은 {@code protect-manual} 대상도 아니다. 그렇게 백업이
+     * 0개가 된 서버는 다음 접속자가 테러를 해도 되돌릴 곳이 없다.</p>
+     *
+     * <p>손상된 백업은 되살려도 복원에 못 쓰므로 세지 않는다. 차등본을 되살릴 때는 기준 백업도
+     * 함께 되살린다. 그러지 않으면 되살린 차등본이 곧바로 복원 불가가 된다.</p>
+     */
+    private void rescueToMinimum(BackupSettings settings,
+                                 List<BackupEntry> all,
+                                 Map<String, BackupEntry> byId,
+                                 Set<BackupEntry> toDelete) {
+        if (settings.minBackups() <= 0 || toDelete.isEmpty()) return;
+
+        int surviving = 0;
+        for (BackupEntry entry : all) {
+            if (entry.complete() && !toDelete.contains(entry)) surviving++;
+        }
+
+        List<String> rescued = new ArrayList<>();
+        for (BackupEntry entry : all) { // 최신순 - 남길 가치가 큰 것부터
+            if (surviving >= settings.minBackups()) break;
+            if (!entry.complete() || !toDelete.contains(entry)) continue;
+
+            if (entry.isDifferential()) {
+                BackupEntry base = byId.get(entry.baseId());
+                if (base == null || !base.complete()) continue; // 기준이 없으면 살려도 소용없다
+                if (toDelete.remove(base)) {
+                    surviving++;
+                    rescued.add(base.id());
+                }
+            }
+            toDelete.remove(entry);
+            surviving++;
+            rescued.add(entry.id());
+        }
+
+        if (!rescued.isEmpty()) {
+            log.info("[백업] 최소 보관 개수(" + settings.minBackups() + "개)를 지키기 위해 "
+                    + rescued.size() + "개를 남깁니다: " + String.join(", ", rescued));
+        }
+    }
+
+    /**
      * 이번에 함께 지워지지 않는 차등 백업이 딸려 있으면 기준 백업을 남겨야 한다.
      *
      * <p>선택 과정에서 여러 번 불리므로 <b>로그를 남기지 않는다.</b> 안내는 결과가 확정된 뒤
@@ -428,9 +539,11 @@ public final class BackupRepository {
      *
      * @return 이 기준 백업을 붙잡고 있는 차등 백업의 id, 없으면 null
      */
-    private String blockingDependent(BackupEntry entry, List<BackupEntry> all, List<BackupEntry> toDelete) {
+    private String blockingDependent(BackupEntry entry,
+                                     Map<String, List<BackupEntry>> dependentsByBase,
+                                     Set<BackupEntry> toDelete) {
         if (entry.isDifferential()) return null;
-        for (BackupEntry other : dependents(all, entry.id())) {
+        for (BackupEntry other : dependentsByBase.getOrDefault(entry.id(), List.of())) {
             if (!toDelete.contains(other)) return other.id();
         }
         return null;
@@ -447,6 +560,7 @@ public final class BackupRepository {
         long freed = 0L;
         for (int i = all.size() - 1; i >= 0 && freed < neededBytes; i--) {
             BackupEntry entry = all.get(i);
+            if (isPinned(entry)) continue; // 진행 중인 차등 백업의 기준
             if (entry.protectedFrom(settings.protectManual())) continue;
             if (!entry.isDifferential() && !dependents(all, entry.id()).isEmpty()) continue;
             if (i == 0) break; // 최소 1개는 남긴다.

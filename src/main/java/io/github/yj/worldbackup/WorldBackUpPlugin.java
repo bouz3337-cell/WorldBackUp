@@ -27,12 +27,22 @@ import java.util.logging.Level;
 
 public final class WorldBackUpPlugin extends JavaPlugin {
 
-    private BackupSettings settings;
-    private BackupRepository repository;
+    // 메인 스레드(/wb reload)가 갈아 끼우고 비동기 백업 스레드가 읽는다.
+    private volatile BackupSettings settings;
+    private volatile BackupRepository repository;
     private BackupService backupService;
     private RestoreService restoreService;
     private ScheduledTask scheduleTask;
     private ScheduledTask watchdogTask;
+
+    /**
+     * 복원 실패 기록이 남아 있어 자동 작업을 멈춘 상태.
+     *
+     * <p>반쯤 복원된 월드를 계속 백업하면, 멀쩡한 예전 백업이 보관 정책에 밀려 사라진다.
+     * 무인 서버에서는 아무도 콘솔을 보지 않아 그 연쇄가 끝까지 진행되므로, 사람이 확인할
+     * 때까지 자동 백업과 보관 정리를 멈춘다. 수동 명령(/wb backup, /wb restore)은 그대로 쓴다.</p>
+     */
+    private volatile boolean restoreFailureHold;
 
     /**
      * 월드가 로드되기 <b>전</b>에 호출된다. 예약된 복원은 반드시 이 시점에 처리해야
@@ -65,7 +75,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         // 안전망: 백업이 돌지 않는데 자동 저장이 꺼진 월드가 남아 있으면 1분마다 되돌린다.
         watchdogTask = Sched.syncTimer(this, () -> backupService.thawLeftovers(), 20L * 60, 20L * 60);
 
-        if (settings.onStartup()) {
+        if (settings.onStartup() && !restoreFailureHold) {
             Sched.syncLater(this, () ->
                     backupService.startAsync(BackupType.STARTUP, "서버 시작", null)
                             .exceptionally(error -> null), 20L * 10);
@@ -96,7 +106,8 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         }
 
         boolean restorePending = PendingRestore.exists(getDataFolder().toPath());
-        if (settings != null && settings.onShutdown() && !restorePending && backupService != null) {
+        if (settings != null && settings.onShutdown() && !restorePending
+                && !restoreFailureHold && backupService != null) {
             getLogger().info("[백업] 서버 종료 백업을 실행합니다. 잠시 기다려 주세요...");
             try {
                 backupService.runBlocking(BackupType.SHUTDOWN, "서버 종료", null);
@@ -123,7 +134,31 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         if (backupService == null) backupService = new BackupService(this);
         if (restoreService == null) restoreService = new RestoreService(this);
 
+        checkRestoreFailureHold();
         startSchedule();
+    }
+
+    /** 처리되지 않은 복원 실패 기록이 있으면 자동 작업을 멈춘다. */
+    private void checkRestoreFailureHold() {
+        List<Path> markers = RestoreApplier.failureMarkers(getDataFolder().toPath());
+        restoreFailureHold = !markers.isEmpty();
+        if (!restoreFailureHold) return;
+
+        getLogger().severe("==================================================================");
+        getLogger().severe("[WorldBackUp] 처리되지 않은 복원 실패 기록이 " + markers.size() + "개 있습니다.");
+        for (Path marker : markers) {
+            getLogger().severe("[WorldBackUp]   - " + marker.getFileName());
+        }
+        getLogger().severe("[WorldBackUp] 월드가 온전하지 않을 수 있어 자동 백업과 보관 정리를 멈춥니다.");
+        getLogger().severe("[WorldBackUp] 그대로 두면 깨진 상태가 백업되면서 멀쩡한 백업이 밀려납니다.");
+        getLogger().severe("[WorldBackUp] 월드를 확인한 뒤 위 파일을 지우고 /wb reload 를 실행하세요.");
+        getLogger().severe("[WorldBackUp] (수동 /wb backup, /wb restore 는 그대로 쓸 수 있습니다)");
+        getLogger().severe("==================================================================");
+    }
+
+    /** 복원 실패 기록 때문에 자동 작업이 멈춰 있는지. */
+    public boolean restoreFailureHold() {
+        return restoreFailureHold;
     }
 
     /**
@@ -139,7 +174,13 @@ public final class WorldBackUpPlugin extends JavaPlugin {
 
         Sched.async(this, () -> {
             try {
-                repo.cleanupOrphans();
+                repo.cleanupOrphans(); // .tmp 조각과 짝 잃은 사이드카만 지우므로 언제나 안전하다
+                if (restoreFailureHold) {
+                    // replaced/ 에는 복원이 밀어낸 옛 월드가 들어 있다. 복원이 실패한 상황에서는
+                    // 그게 유일한 복구 재료이므로 정리하지 않는다.
+                    getLogger().warning("[백업] 복원 실패 기록이 있어 보관 정리와 replaced 정리를 건너뜁니다.");
+                    return;
+                }
                 RestoreApplier.cleanupReplaced(getDataFolder().toPath(), snapshot.keepReplacedMax(), getLogger());
                 repo.prune(snapshot);
             } catch (Exception e) {
@@ -173,6 +214,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         BackupRepository repo = repository;
         BackupSettings snapshot = settings;
         if (repo == null || snapshot == null) return;
+        if (restoreFailureHold) return; // 깨졌을지 모르는 상태에서 멀쩡한 백업을 지우지 않는다
         try {
             Sched.async(this, () -> repo.prune(snapshot));
         } catch (Exception ignored) {
@@ -186,6 +228,10 @@ public final class WorldBackUpPlugin extends JavaPlugin {
             scheduleTask = null;
         }
         if (!settings.enabled()) return;
+        if (restoreFailureHold) {
+            getLogger().severe("[백업] 복원 실패 기록이 있어 자동 백업을 시작하지 않습니다.");
+            return;
+        }
 
         long periodTicks = settings.intervalMinutes() * 60L * 20L;
         long delayTicks = Math.max(20L * 10, settings.initialDelayMinutes() * 60L * 20L);
@@ -207,22 +253,43 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         }, delayTicks, periodTicks);
     }
 
-    /** 직전 부팅에서 복원이 수행됐다면 결과를 콘솔에 알린다. */
+    /** 직전 부팅에서 복원이 수행됐다면 결과를 콘솔에 알리고, 차등 백업의 기준을 새로 잡게 한다. */
     private void reportLastRestore() {
         Path report = getDataFolder().toPath().resolve(PendingRestore.REPORT_NAME);
         if (!Files.isRegularFile(report)) return;
         try {
             YamlConfiguration yaml = YamlConfiguration.loadConfiguration(report.toFile());
             long finishedAt = report.toFile().lastModified();
-            if (System.currentTimeMillis() - finishedAt > 10 * 60 * 1000L) return; // 10분 이내 결과만 표시
             boolean success = yaml.getBoolean("success", false);
-            getLogger().info("[복원] 직전 복원 결과: " + (success ? "성공" : "실패")
-                    + " (백업 " + yaml.getString("backup-id") + ", 파일 "
-                    + yaml.getInt("restored-files") + "개 복원, " + yaml.getInt("failed-files") + "개 실패)");
+
+            // 보고서는 지워지지 않고 남으므로, 알림은 갓 끝난 복원에 대해서만 한 번 띄운다.
+            if (System.currentTimeMillis() - finishedAt <= 10 * 60 * 1000L) {
+                getLogger().info("[복원] 직전 복원 결과: " + (success ? "성공" : "실패")
+                        + " (백업 " + yaml.getString("backup-id") + ", 파일 "
+                        + yaml.getInt("restored-files") + "개 복원, " + yaml.getInt("failed-files") + "개 실패)");
+            }
+
             // 월드 내용이 통째로 바뀌었으니 차등 백업의 기준을 새로 잡는다.
-            if (success && backupService != null) backupService.requireFullBackup();
+            //
+            // 이 판단은 위 알림용 시간 창과 <b>분리해야 한다.</b> 복원 직후 백업을 한 번도 만들지
+            // 않은 채 서버를 껐다가 한참 뒤에 켜면 재설정이 통째로 빠지는데, 그러면 다음 차등본이
+            // 낡은 기준 위에 얹힌다. 복원은 zip 의 초 단위 타임스탬프로 수정 시각을 되돌리므로
+            // 거의 모든 파일이 "바뀜"으로 판정되어, 그 차등본은 월드 전체를 담고서도 쓸모없어진
+            // 기준까지 붙잡아 둔다. 디스크에 월드가 두 벌 남는 셈이다.
+            //
+            // 복원 이후에 만들어진 백업이 이미 있다면 기준은 그 백업이 새로 잡았으므로 건너뛴다.
+            if (success && backupService != null && !hasBackupNewerThan(finishedAt)) {
+                backupService.requireFullBackup();
+            }
         } catch (Exception ignored) {
         }
+    }
+
+    /** 이 시각 이후에 만들어진 백업이 있는지. */
+    private boolean hasBackupNewerThan(long millis) {
+        BackupRepository repo = repository;
+        if (repo == null) return false;
+        return repo.list().stream().anyMatch(entry -> entry.createdAt().toEpochMilli() > millis);
     }
 
     /**
