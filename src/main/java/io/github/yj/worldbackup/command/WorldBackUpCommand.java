@@ -1,6 +1,5 @@
 package io.github.yj.worldbackup.command;
 
-import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
@@ -24,7 +23,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -38,6 +42,9 @@ import java.util.Optional;
 public final class WorldBackUpCommand {
 
     private static final int PAGE_SIZE = 8;
+
+    private static final DateTimeFormatter TIME_ONLY =
+            DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault());
 
     private final WorldBackUpPlugin plugin;
 
@@ -68,9 +75,12 @@ public final class WorldBackUpCommand {
 
                 .then(Commands.literal("list")
                         .executes(ctx -> run(ctx, sender -> list(sender, 1)))
-                        .then(Commands.argument("페이지", IntegerArgumentType.integer(1))
+                        // 날짜별 요약. 몇 주 전 것을 찾을 때 목록을 넘기는 대신 여기서 짚는다.
+                        .then(Commands.literal("days").executes(ctx -> run(ctx, this::listDays)))
+                        .then(Commands.argument("페이지", StringArgumentType.word())
+                                .suggests(listSuggestions())
                                 .executes(ctx -> run(ctx, sender ->
-                                        list(sender, IntegerArgumentType.getInteger(ctx, "페이지"))))))
+                                        listToken(sender, StringArgumentType.getString(ctx, "페이지"))))))
 
                 .then(backupArgument("info", "worldbackup.use", this::info))
                 .then(Commands.literal("restore")
@@ -135,6 +145,21 @@ public final class WorldBackUpCommand {
     /** 시각 표현을 ID 보다 앞에 둔다. 사고를 발견한 사람이 아는 것은 ID 가 아니라 시각이다. */
     private static final List<String> TIME_HINTS = List.of("latest", "30m", "1h", "3h", "6h", "12h", "1d");
 
+    /** 백업이 실제로 있는 날짜를 제안한다. 없는 날을 뒤지게 두지 않는다. */
+    private SuggestionProvider<CommandSourceStack> listSuggestions() {
+        return (ctx, builder) -> {
+            String prefix = builder.getRemainingLowerCase();
+            if ("days".startsWith(prefix)) builder.suggest("days");
+            plugin.repository().list().stream()
+                    .map(entry -> entry.localDate().toString())
+                    .distinct()
+                    .filter(date -> date.startsWith(prefix))
+                    .limit(30)
+                    .forEach(builder::suggest);
+            return builder.buildFuture();
+        };
+    }
+
     private SuggestionProvider<CommandSourceStack> backupSuggestions() {
         return (ctx, builder) -> {
             String prefix = builder.getRemainingLowerCase();
@@ -171,7 +196,8 @@ public final class WorldBackUpCommand {
     private void help(CommandSender sender) {
         Msg.sendRaw(sender, "<dark_gray>─────────</dark_gray> <gradient:#5eead4:#38bdf8><bold>WorldBackUp</bold></gradient> <dark_gray>─────────</dark_gray>");
         line(sender, "/wb backup [메모]", "지금 즉시 백업합니다");
-        line(sender, "/wb list [페이지]", "백업 목록을 봅니다");
+        line(sender, "/wb list [페이지|날짜]", "백업 목록을 봅니다");
+        line(sender, "/wb list days", "날짜별로 몇 개씩 있는지 봅니다");
         line(sender, "/wb info [ID|번호]", "백업 상세 정보를 봅니다");
         line(sender, "/wb restore [ID|번호] (worlds)", "그 시점으로 되돌립니다");
         line(sender, "/wb restore at [시각]", "시각으로 찾아 되돌립니다 (03:00, 9h)");
@@ -207,6 +233,82 @@ public final class WorldBackUpCommand {
                 }));
     }
 
+    /** {@code /wb list <값>} 의 값이 페이지 번호인지 날짜인지 갈라 준다. */
+    private void listToken(CommandSender sender, String token) {
+        if (token.matches("\\d{1,4}")) {
+            list(sender, Integer.parseInt(token));
+            return;
+        }
+        try {
+            listOnDate(sender, LocalDate.parse(token));
+        } catch (DateTimeParseException e) {
+            Msg.send(sender, "<red>페이지 번호나 날짜를 넣어 주세요: <white>" + Msg.sanitize(token) + "</white></red>");
+            Msg.send(sender, "<gray>예) <white>/wb list 3</white>, <white>/wb list 2026-08-01</white>, "
+                    + "<white>/wb list days</white></gray>");
+        }
+    }
+
+    /** 하루치만 본다. 사고 시각을 아는 날에 곧바로 들어갈 수 있어야 한다. */
+    private void listOnDate(CommandSender sender, LocalDate day) {
+        List<BackupEntry> entries = plugin.repository().list().stream()
+                .filter(entry -> entry.localDate().equals(day))
+                .toList();
+
+        if (entries.isEmpty()) {
+            Msg.send(sender, "<gray><white>" + day + "</white> 에 만들어진 백업이 없습니다.</gray>");
+            Msg.send(sender, "<click:run_command:'/wb list days'><gray>» "
+                    + "<white>/wb list days</white> 로 어느 날짜에 백업이 있는지 보세요.</gray></click>");
+            return;
+        }
+
+        Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>" + day + dayLabel(day) + "</aqua> <gray>("
+                + entries.size() + "개)</gray>");
+        for (BackupEntry entry : entries) {
+            Msg.sendRaw(sender, "  " + entryLine(entry));
+        }
+        Msg.sendRaw(sender, "<click:run_command:'/wb list days'><dark_gray>» 날짜 목록으로</dark_gray></click>");
+    }
+
+    /**
+     * 날짜별 요약.
+     *
+     * <p>몇 주 전 것을 찾을 때 목록을 여러 장 넘기는 대신 여기서 바로 짚는다.
+     * 계단식 보관이 실제로 도는지도 이 화면에서 드러난다 - 오늘은 촘촘하고
+     * 과거로 갈수록 개수가 줄어드는 모양이 보이면 계단이 동작하고 있는 것이다.</p>
+     */
+    private void listDays(CommandSender sender) {
+        List<BackupEntry> entries = plugin.repository().list();
+        if (entries.isEmpty()) {
+            Msg.send(sender, "<gray>아직 백업이 없습니다.</gray>");
+            return;
+        }
+
+        Map<LocalDate, List<BackupEntry>> byDay = new LinkedHashMap<>();
+        for (BackupEntry entry : entries) {
+            byDay.computeIfAbsent(entry.localDate(), key -> new ArrayList<>()).add(entry);
+        }
+
+        Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>날짜별 백업</aqua> <gray>("
+                + entries.size() + "개, " + byDay.size() + "일)</gray>");
+
+        for (Map.Entry<LocalDate, List<BackupEntry>> day : byDay.entrySet()) {
+            List<BackupEntry> ofDay = day.getValue(); // 최신순
+            String newest = TIME_ONLY.format(ofDay.get(0).createdAt());
+            String oldest = TIME_ONLY.format(ofDay.get(ofDay.size() - 1).createdAt());
+            String span = ofDay.size() == 1 ? newest : oldest + "~" + newest;
+            long bytes = ofDay.stream().mapToLong(BackupEntry::archiveBytes).sum();
+
+            Msg.sendRaw(sender, "<hover:show_text:'<gray>클릭하면 이 날의 백업 목록</gray>'>"
+                    + "<click:run_command:'/wb list " + day.getKey() + "'>"
+                    + " <white>" + day.getKey() + "</white><dark_gray>" + dayLabel(day.getKey()) + "</dark_gray>"
+                    + " <gray>" + ofDay.size() + "개</gray>"
+                    + " <dark_gray>" + span + " · " + FileUtil.humanBytes(bytes) + "</dark_gray>"
+                    + "</click></hover>");
+        }
+        Msg.sendRaw(sender, "<dark_gray>날짜를 클릭하거나 <white>/wb restore at 2026-08-01 03:00</white> "
+                + "처럼 시각으로 바로 되돌릴 수 있습니다.</dark_gray>");
+    }
+
     private void list(CommandSender sender, int requestedPage) {
         List<BackupEntry> entries = plugin.repository().list();
         if (entries.isEmpty()) {
@@ -223,6 +325,12 @@ public final class WorldBackUpCommand {
         Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>백업 목록</aqua> <gray>(" + entries.size() + "개, "
                 + FileUtil.humanBytes(totalBytes) + ")</gray> <dark_gray>[" + page + "/" + pages + "]</dark_gray>");
 
+        // 몇 주 전 것을 찾을 수 있는지부터 알려 준다. 없는 시점을 뒤지느라 시간을 쓰지 않도록.
+        BackupEntry oldest = entries.get(entries.size() - 1);
+        BackupEntry newest = entries.get(0);
+        Msg.sendRaw(sender, "<dark_gray>보관 범위: " + oldest.displayTime() + " ~ " + newest.displayTime()
+                + " (" + FileUtil.humanDuration(Duration.between(oldest.createdAt(), newest.createdAt())) + ")</dark_gray>");
+
         LocalDate previousDay = null;
         for (int i = from; i < to; i++) {
             BackupEntry entry = entries.get(i);
@@ -234,22 +342,37 @@ public final class WorldBackUpCommand {
                 Msg.sendRaw(sender, "<dark_gray>  " + day + dayLabel(day) + "</dark_gray>");
             }
 
-            String age = FileUtil.humanDuration(Duration.between(entry.createdAt(), Instant.now()));
-            String memo = entry.hasLabel() ? " <dark_gray>| <italic>" + Msg.sanitize(entry.label()) + "</italic></dark_gray>" : "";
-            String tags = entry.locked() ? " <gold>[보호]</gold>" : "";
-            if (entry.isDifferential()) tags += " <yellow>[차등]</yellow>";
-            if (!entry.complete()) tags += " <red>[손상]</red>";
-            Msg.sendRaw(sender,
-                    "<dark_gray>#" + (i + 1) + "</dark_gray> "
-                            + "<hover:show_text:'<gray>클릭하면 상세 정보</gray>'><click:run_command:'/wb info " + entry.id() + "'>"
-                            + "<white>" + entry.displayTime() + "</white></click></hover> "
-                            + "<dark_gray>|</dark_gray> " + entry.type().color() + entry.type().korean() + "</" + colorTag(entry.type().color()) + "> "
-                            + "<dark_gray>|</dark_gray> <aqua>" + FileUtil.humanBytes(entry.archiveBytes()) + "</aqua> "
-                            + "<dark_gray>|</dark_gray> <gray>" + age + " 전</gray>" + tags + memo);
+            Msg.sendRaw(sender, "<dark_gray>#" + (i + 1) + "</dark_gray> " + entryLine(entry));
+        }
+
+        StringBuilder nav = new StringBuilder();
+        if (page > 1) {
+            nav.append("<click:run_command:'/wb list ").append(page - 1).append("'><gray>« 이전</gray></click>  ");
         }
         if (page < pages) {
-            Msg.sendRaw(sender, "<click:run_command:'/wb list " + (page + 1) + "'><gray>» 다음 페이지</gray></click>");
+            nav.append("<click:run_command:'/wb list ").append(page + 1).append("'><gray>다음 »</gray></click>  ");
         }
+        nav.append("<click:run_command:'/wb list days'><dark_gray>[날짜별로 보기]</dark_gray></click>");
+        Msg.sendRaw(sender, nav.toString());
+    }
+
+    /** 목록 한 줄. 페이지 목록과 날짜별 목록이 같은 모양을 쓰도록 한 곳에 둔다. */
+    private String entryLine(BackupEntry entry) {
+        String age = FileUtil.humanDuration(Duration.between(entry.createdAt(), Instant.now()));
+        String memo = entry.hasLabel()
+                ? " <dark_gray>| <italic>" + Msg.sanitize(entry.label()) + "</italic></dark_gray>" : "";
+        String tags = entry.locked() ? " <gold>[보호]</gold>" : "";
+        if (entry.isDifferential()) tags += " <yellow>[차등]</yellow>";
+        if (!entry.complete()) tags += " <red>[손상]</red>";
+        if (!entry.hasPlayerData()) {
+            tags += entry.playerDataUnknown() ? " <yellow>[플레이어?]</yellow>" : " <red>[플레이어없음]</red>";
+        }
+        return "<hover:show_text:'<gray>클릭하면 상세 정보</gray>'><click:run_command:'/wb info " + entry.id() + "'>"
+                + "<white>" + entry.displayTime() + "</white></click></hover> "
+                + "<dark_gray>|</dark_gray> " + entry.type().color() + entry.type().korean()
+                + "</" + colorTag(entry.type().color()) + "> "
+                + "<dark_gray>|</dark_gray> <aqua>" + FileUtil.humanBytes(entry.archiveBytes()) + "</aqua> "
+                + "<dark_gray>|</dark_gray> <gray>" + age + " 전</gray>" + tags + memo;
     }
 
     private String dayLabel(LocalDate day) {
