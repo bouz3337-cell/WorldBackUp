@@ -307,6 +307,30 @@ class BackupRetentionTest {
         assertEquals(List.of("recent"), ids(repo), "계단을 못 읽으면 max-age-days 가 그대로 동작한다");
     }
 
+    /** 깨진 계단을 조용히 버리면 관리자가 기대한 시간대가 소리 없이 빈다. 경고가 남아야 한다. */
+    @Test
+    void malformedTiersProduceWarnings() {
+        BackupSettings settings = settings(cfg -> cfg.set("retention.tiers", List.of(
+                Map.of("every", "이상한값", "keep", 5),
+                Map.of("every", "6h", "keep", 0),
+                Map.of("every", "1h", "keep", 3))));
+
+        assertEquals(1, settings.tiers().size(), "멀쩡한 계단 하나만 살아남는다");
+        assertEquals(2, settings.tierWarnings().size(), "버린 계단마다 경고가 있어야 한다");
+        assertTrue(settings.tierWarnings().get(0).contains("every"));
+        assertTrue(settings.tierWarnings().get(1).contains("keep"));
+    }
+
+    @Test
+    void allTiersBrokenIsCalledOutExplicitly() {
+        BackupSettings settings = settings(cfg -> cfg.set("retention.tiers", List.of(
+                Map.of("every", "??", "keep", 5))));
+
+        assertTrue(settings.tiers().isEmpty());
+        assertTrue(settings.tierWarnings().stream().anyMatch(w -> w.contains("예전 정책")),
+                "예전 정책으로 되돌아간다는 사실을 알려야 한다");
+    }
+
     /** 계단이 다 솎아내도 최소 보관 개수는 지켜야 한다. */
     @Test
     void minBackupsStillAppliesUnderTiers() throws Exception {

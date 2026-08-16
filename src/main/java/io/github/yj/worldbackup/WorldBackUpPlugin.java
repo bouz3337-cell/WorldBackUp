@@ -152,6 +152,10 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         if (backupService == null) backupService = new BackupService(this);
         if (restoreService == null) restoreService = new RestoreService(this);
 
+        for (String warning : settings.tierWarnings()) {
+            getLogger().warning("[백업] " + warning);
+        }
+
         playerDataCache = null; // 설정이 바뀌면 대상 월드도 바뀔 수 있다
         checkRestoreFailureHold();
         startSchedule();

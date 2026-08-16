@@ -139,6 +139,23 @@ class RetentionTiersTest {
         assertEquals(Set.of("healthy"), keep);
     }
 
+    /**
+     * 호스팅 환경에서 시계가 어긋나면 방금 만든 백업이 미래 시각을 갖는다.
+     * 그대로 두면 첫 구간의 끝(=지금)보다 뒤라 어떤 계단에도 못 들어가고 삭제된다.
+     * 하필 가장 최근 백업이 사라지는 셈이라 실패 방향이 최악이다.
+     */
+    @Test
+    void backupsStampedInTheFutureAreNotDropped() {
+        List<RetentionTiers.Tier> noZeroTier = List.of(new RetentionTiers.Tier(Duration.ofHours(6), 4));
+        List<BackupEntry> all = List.of(
+                entry("future", NOW.plus(Duration.ofMinutes(3)), false, true),
+                entry("normal", NOW.minus(Duration.ofMinutes(10)), false, true));
+
+        Set<String> keep = RetentionTiers.select(all, noZeroTier, NOW);
+
+        assertTrue(keep.contains("future"), "미래로 찍힌 최신 백업이 사라지면 안 된다");
+    }
+
     @Test
     void emptyTiersKeepNothing() {
         assertTrue(RetentionTiers.select(every15Minutes(10), List.of(), NOW).isEmpty(),

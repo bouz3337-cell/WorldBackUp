@@ -49,7 +49,16 @@ public final class RetentionTiers {
 
         List<BackupEntry> candidates = newestFirst.stream().filter(BackupEntry::complete).toList();
         int index = 0;
+
+        // 시작점은 "지금" 이지만, 그보다 미래로 찍힌 백업이 있으면 거기서 출발한다.
+        // 호스팅 환경에서 시계가 어긋나면 방금 만든 백업이 미래 시각을 갖는데, 그대로 두면
+        // 첫 구간의 끝(=지금)보다 뒤라 어떤 계단에도 못 들어가고 조용히 삭제된다.
+        // 하필 가장 최근 백업이 사라지는 셈이라 실패 방향이 최악이다.
         Instant cursor = now;
+        if (!candidates.isEmpty()) {
+            Instant newest = candidates.get(0).createdAt();
+            if (newest.isAfter(cursor)) cursor = newest.plusMillis(1);
+        }
 
         for (Tier tier : tiers) {
             if (tier.keep() <= 0) continue;

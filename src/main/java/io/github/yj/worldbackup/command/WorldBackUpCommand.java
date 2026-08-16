@@ -10,6 +10,7 @@ import io.github.yj.worldbackup.WorldBackUpPlugin;
 import io.github.yj.worldbackup.backup.BackupEntry;
 import io.github.yj.worldbackup.backup.BackupRepository;
 import io.github.yj.worldbackup.backup.BackupType;
+import io.github.yj.worldbackup.backup.RetentionTiers;
 import io.github.yj.worldbackup.config.BackupSettings;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.Msg;
@@ -74,6 +75,11 @@ public final class WorldBackUpCommand {
                 .then(backupArgument("info", "worldbackup.use", this::info))
                 .then(Commands.literal("restore")
                         .requires(source -> has(source.getSender(), "worldbackup.restore"))
+                        // Brigadier 의 word() 는 콜론과 공백을 받지 못한다. "03:00" 이나
+                        // "2026-08-16 03:00" 은 인자 파싱 단계에서 거부되므로 별도 통로를 둔다.
+                        .then(Commands.literal("at")
+                                .then(Commands.argument("시각", StringArgumentType.greedyString())
+                                        .executes(ctx -> run(ctx, sender -> restoreAt(ctx, sender)))))
                         .then(Commands.argument("백업", StringArgumentType.word())
                                 .suggests(backupSuggestions())
                                 .executes(ctx -> run(ctx, sender -> restore(ctx, sender, false)))
@@ -168,6 +174,7 @@ public final class WorldBackUpCommand {
         line(sender, "/wb list [페이지]", "백업 목록을 봅니다");
         line(sender, "/wb info [ID|번호]", "백업 상세 정보를 봅니다");
         line(sender, "/wb restore [ID|번호] (worlds)", "그 시점으로 되돌립니다");
+        line(sender, "/wb restore at [시각]", "시각으로 찾아 되돌립니다 (03:00, 9h)");
         line(sender, "/wb confirm", "복원을 확정합니다");
         line(sender, "/wb cancel", "복원 요청을 취소합니다");
         line(sender, "/wb delete [ID|번호] (cascade)", "백업을 삭제합니다");
@@ -311,6 +318,25 @@ public final class WorldBackUpCommand {
                 .ifPresent(entry -> plugin.restoreService().request(sender, entry, worldsOnly));
     }
 
+    /**
+     * {@code /wb restore at <시각>} - 콜론과 공백이 든 시각 표현을 받는다.
+     *
+     * <p>일반 인자로는 {@code 03:00} 을 칠 수 없다. Brigadier 가 인용 없는 문자열에서
+     * 콜론과 공백을 허용하지 않기 때문이다. 사고를 발견한 사람이 가장 자연스럽게 떠올리는
+     * 형식이라 통로를 따로 열어 둔다.</p>
+     */
+    private void restoreAt(CommandContext<CommandSourceStack> ctx, CommandSender sender) {
+        String raw = StringArgumentType.getString(ctx, "시각").trim();
+        Instant target = TimeToken.parse(raw);
+        if (target == null) {
+            Msg.send(sender, "<red>시각을 알아듣지 못했습니다: <white>" + Msg.sanitize(raw) + "</white></red>");
+            Msg.send(sender, "<gray>예) <white>/wb restore at 03:00</white>, "
+                    + "<white>/wb restore at 2026-08-16 03:00</white>, <white>/wb restore at 9h</white></gray>");
+            return;
+        }
+        resolveAt(sender, target).ifPresent(entry -> plugin.restoreService().request(sender, entry, false));
+    }
+
     private void delete(CommandContext<CommandSourceStack> ctx, CommandSender sender, boolean cascade) {
         Optional<BackupEntry> found = resolve(sender, StringArgumentType.getString(ctx, "백업"));
         if (found.isEmpty()) return;
@@ -445,8 +471,23 @@ public final class WorldBackUpCommand {
         Msg.sendRaw(sender, " <gray>저장 위치:</gray> <white>" + settings.backupDir() + "</white>");
         Msg.sendRaw(sender, " <gray>디스크   :</gray> <white>"
                 + FileUtil.humanBytes(FileUtil.usableSpace(settings.backupDir())) + " 남음</white>");
-        Msg.sendRaw(sender, " <gray>보관 정책:</gray> <white>최대 " + settings.maxBackups() + "개 / "
-                + settings.maxAgeDays() + "일</white>");
+        // 계단을 켜면 max-backups/max-age-days 는 동작하지 않는다. 그걸 그대로 보여 주면
+        // 실제로 적용되지 않는 값을 보고 판단하게 된다.
+        if (settings.tiers().isEmpty()) {
+            Msg.sendRaw(sender, " <gray>보관 정책:</gray> <white>최대 " + settings.maxBackups() + "개 / "
+                    + settings.maxAgeDays() + "일</white>");
+        } else {
+            int planned = settings.tiers().stream().mapToInt(RetentionTiers.Tier::keep).sum();
+            Msg.sendRaw(sender, " <gray>보관 정책:</gray> <white>계단식 " + settings.tiers().size()
+                    + "단계</white> <dark_gray>(최대 " + planned + "개)</dark_gray>");
+            for (RetentionTiers.Tier tier : settings.tiers()) {
+                String every = tier.every().isZero() ? "최신" : FileUtil.humanDuration(tier.every()) + "마다";
+                Msg.sendRaw(sender, "   <dark_gray>· " + every + " × " + tier.keep() + "개</dark_gray>");
+            }
+        }
+        if (settings.minBackups() > 0) {
+            Msg.sendRaw(sender, " <gray>최소 보관:</gray> <white>" + settings.minBackups() + "개</white>");
+        }
     }
 
     private void reload(CommandSender sender) {
@@ -469,22 +510,7 @@ public final class WorldBackUpCommand {
      */
     private Optional<BackupEntry> resolve(CommandSender sender, String token) {
         Instant target = TimeToken.parse(token);
-        if (target != null) {
-            Optional<BackupEntry> found = plugin.repository().resolveAtOrBefore(target);
-            if (found.isEmpty()) {
-                Msg.send(sender, "<red><white>" + BackupEntry.DISPLAY_FORMAT.format(target)
-                        + "</white> 이전의 백업이 없습니다.</red>");
-                Msg.send(sender, "<gray>가장 오래된 백업보다 더 과거를 요청하셨습니다. "
-                        + "<white>/wb list</white> 로 보관 범위를 확인하세요.</gray>");
-                return found;
-            }
-            BackupEntry entry = found.get();
-            String gap = FileUtil.humanDuration(Duration.between(entry.createdAt(), target));
-            Msg.send(sender, "<gray>요청 <white>" + BackupEntry.DISPLAY_FORMAT.format(target)
-                    + "</white> → 그 이전 가장 최근 백업 <white>" + entry.displayTime()
-                    + "</white> <dark_gray>(" + gap + " 더 과거)</dark_gray></gray>");
-            return found;
-        }
+        if (target != null) return resolveAt(sender, target);
 
         Optional<BackupEntry> found = plugin.repository().resolve(token);
         if (found.isEmpty()) {
@@ -492,6 +518,24 @@ public final class WorldBackUpCommand {
             Msg.send(sender, "<gray>ID·<white>#번호</white>·<white>latest</white> 외에 "
                     + "<white>9h</white>(9시간 전), <white>03:00</white>(그 시각) 도 됩니다.</gray>");
         }
+        return found;
+    }
+
+    /** 이 시각 이전의 가장 최근 백업을 고르고, 무엇을 골랐는지 알려 준다. */
+    private Optional<BackupEntry> resolveAt(CommandSender sender, Instant target) {
+        Optional<BackupEntry> found = plugin.repository().resolveAtOrBefore(target);
+        if (found.isEmpty()) {
+            Msg.send(sender, "<red><white>" + BackupEntry.DISPLAY_FORMAT.format(target)
+                    + "</white> 이전의 백업이 없습니다.</red>");
+            Msg.send(sender, "<gray>가장 오래된 백업보다 더 과거를 요청하셨습니다. "
+                    + "<white>/wb list</white> 로 보관 범위를 확인하세요.</gray>");
+            return found;
+        }
+        BackupEntry entry = found.get();
+        String gap = FileUtil.humanDuration(Duration.between(entry.createdAt(), target));
+        Msg.send(sender, "<gray>요청 <white>" + BackupEntry.DISPLAY_FORMAT.format(target)
+                + "</white> → 그 이전 가장 최근 백업 <white>" + entry.displayTime()
+                + "</white> <dark_gray>(" + gap + " 더 과거)</dark_gray></gray>");
         return found;
     }
 

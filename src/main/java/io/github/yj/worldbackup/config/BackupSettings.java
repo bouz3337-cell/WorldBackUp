@@ -39,6 +39,15 @@ public final class BackupSettings {
 
     // retention
     private final List<RetentionTiers.Tier> tiers;
+
+    /**
+     * 계단 설정을 읽으며 생긴 경고.
+     *
+     * <p>형식이 깨진 계단을 조용히 버리면 관리자가 기대한 시간대가 소리 없이 비어 버린다.
+     * 여기 모아 두고 플러그인이 로드할 때 콘솔에 띄운다.
+     * ({@link org.bukkit.Bukkit} 을 여기서 쓰면 서버 없이 도는 테스트가 깨진다)</p>
+     */
+    private final List<String> tierWarnings = new ArrayList<>();
     private final int maxBackups;
     private final int minBackups;
     private final int maxAgeDays;
@@ -131,14 +140,30 @@ public final class BackupSettings {
      * <p>형식이 깨진 항목은 조용히 버리지 않고 건너뛰되, 하나라도 제대로 읽히면 계단식으로 동작한다.
      * 전부 깨졌다면 빈 목록이 되어 예전 정책으로 돌아가므로 백업이 통째로 정리되는 일은 없다.</p>
      */
-    private static List<RetentionTiers.Tier> readTiers(FileConfiguration cfg) {
+    private List<RetentionTiers.Tier> readTiers(FileConfiguration cfg) {
         List<RetentionTiers.Tier> tiers = new ArrayList<>();
-        for (Map<?, ?> raw : cfg.getMapList("retention.tiers")) {
-            Duration every = parseDuration(String.valueOf(raw.get("every")));
-            if (every == null) continue;
-            int keep = raw.get("keep") instanceof Number number ? number.intValue() : 0;
-            if (keep <= 0) continue;
+        List<Map<?, ?>> raw = cfg.getMapList("retention.tiers");
+        for (int i = 0; i < raw.size(); i++) {
+            Map<?, ?> item = raw.get(i);
+            String label = "retention.tiers[" + i + "]";
+
+            Duration every = parseDuration(String.valueOf(item.get("every")));
+            if (every == null) {
+                tierWarnings.add(label + ": every 값을 알아듣지 못했습니다 ("
+                        + item.get("every") + "). 0, 15m, 6h, 3d 형식만 됩니다. 이 계단은 무시합니다.");
+                continue;
+            }
+            int keep = item.get("keep") instanceof Number number ? number.intValue() : 0;
+            if (keep <= 0) {
+                tierWarnings.add(label + ": keep 이 " + item.get("keep")
+                        + " 이라 이 계단은 아무것도 남기지 않습니다. 무시합니다.");
+                continue;
+            }
             tiers.add(new RetentionTiers.Tier(every, keep));
+        }
+        if (tiers.isEmpty() && !raw.isEmpty()) {
+            tierWarnings.add("retention.tiers 를 하나도 읽지 못해 예전 정책"
+                    + "(max-backups/max-age-days/keep-daily)으로 동작합니다.");
         }
         return List.copyOf(tiers);
     }
@@ -217,6 +242,9 @@ public final class BackupSettings {
      * 관리자가 기대한 시간대가 조용히 비어 버린다.</p>
      */
     public List<RetentionTiers.Tier> tiers() { return tiers; }
+
+    /** 계단 설정을 읽으며 생긴 경고. 비어 있으면 문제없이 읽혔다는 뜻이다. */
+    public List<String> tierWarnings() { return List.copyOf(tierWarnings); }
 
     public int maxBackups() { return maxBackups; }
 
