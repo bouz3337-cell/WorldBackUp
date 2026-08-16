@@ -102,6 +102,53 @@ class PlayerDataTest {
                 "zip 에 같은 엔트리가 두 번 들어가면 백업 전체가 실패한다");
     }
 
+    // ------------------------------------------------------------------
+    // 정해진 후보에 없을 때의 탐색
+
+    /** 후보 목록이 아무리 늘어도 결국 새로운 배치를 만난다. 마지막에는 실제로 찾아본다. */
+    @Test
+    void searchFindsPlayerDataInAnUnexpectedPlace() throws IOException {
+        Path serverRoot = tmp.resolve("server");
+        Path world = serverRoot.resolve("world");
+        Files.createDirectories(world.resolve("region"));
+        // 월드 폴더 안도, 서버 루트도 아닌 곳
+        Files.createDirectories(serverRoot.resolve("data/players/playerdata"));
+
+        assertFalse(PlayerData.locate(List.of(world, serverRoot)).inventory(), "정해진 후보로는 못 찾는다");
+
+        PlayerData.Located located = PlayerData.search(serverRoot, List.of(world, serverRoot));
+
+        assertTrue(located.inventory(), "훑어서 찾아내야 한다");
+        assertEquals(List.of("data/players/playerdata"), relativize(serverRoot, located.paths()));
+    }
+
+    /** 플러그인 데이터 폴더 안의 동명 폴더를 서버의 플레이어 데이터로 착각하면 안 된다. */
+    @Test
+    void searchSkipsPluginDataFolders() throws IOException {
+        Path serverRoot = tmp.resolve("server");
+        Files.createDirectories(serverRoot.resolve("world/region"));
+        Files.createDirectories(serverRoot.resolve("plugins/SomePlugin/playerdata"));
+
+        PlayerData.Located located = PlayerData.search(serverRoot, List.of(serverRoot.resolve("world"), serverRoot));
+
+        assertFalse(located.inventory(), "plugins/ 아래는 서버의 플레이어 데이터가 아니다");
+        assertTrue(located.paths().isEmpty());
+    }
+
+    /** 흔한 배치에서는 훑는 비용이 아예 들지 않아야 한다. */
+    @Test
+    void searchDoesNotWalkWhenTheDirectCandidateHits() throws IOException {
+        Path serverRoot = tmp.resolve("server");
+        Path world = serverRoot.resolve("world");
+        Files.createDirectories(world.resolve("playerdata"));
+        Files.createDirectories(serverRoot.resolve("data/players/playerdata")); // 훑었다면 이것도 잡혔을 것
+
+        PlayerData.Located located = PlayerData.search(serverRoot, List.of(world, serverRoot));
+
+        assertEquals(List.of("world/playerdata"), relativize(serverRoot, located.paths()),
+                "바로 맞히면 더 훑지 않는다");
+    }
+
     private static List<String> relativize(Path serverRoot, List<Path> paths) {
         return paths.stream().map(path -> FileUtil.relativize(serverRoot, path)).toList();
     }

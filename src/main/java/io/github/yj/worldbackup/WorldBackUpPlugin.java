@@ -297,15 +297,19 @@ public final class WorldBackUpPlugin extends JavaPlugin {
      */
     public PlayerData.Located locatePlayerData() {
         BackupSettings snapshot = settings;
+        if (snapshot == null) return PlayerData.locate(List.of());
+        return PlayerData.search(snapshot.serverRoot(), playerDataBases(snapshot));
+    }
+
+    /** 플레이어 데이터를 찾아볼 기준 경로들. 로드된 월드 폴더와 서버 루트. */
+    private List<Path> playerDataBases(BackupSettings snapshot) {
         List<Path> bases = new ArrayList<>();
-        if (snapshot != null) {
-            for (World world : Bukkit.getWorlds()) {
-                if (!snapshot.includesWorld(world.getName())) continue;
-                bases.add(world.getWorldFolder().toPath().toAbsolutePath().normalize());
-            }
-            bases.add(snapshot.serverRoot());
+        for (World world : Bukkit.getWorlds()) {
+            if (!snapshot.includesWorld(world.getName())) continue;
+            bases.add(world.getWorldFolder().toPath().toAbsolutePath().normalize());
         }
-        return PlayerData.locate(bases);
+        bases.add(snapshot.serverRoot());
+        return bases;
     }
 
     /**
@@ -316,7 +320,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
     private void reportPlayerData() {
         PlayerData.Located located = locatePlayerData();
         if (!located.inventory()) {
-            PlayerData.warnMissing(getLogger());
+            PlayerData.warnMissing(getLogger(), settings.serverRoot(), playerDataBases(settings));
             return;
         }
         List<String> shown = new ArrayList<>();
