@@ -55,6 +55,7 @@ public final class BackupSettings {
     private final boolean protectManual;
     private final int maxProtected;
     private final long minFreeDiskBytes;
+    private final long maxTotalBytes;
 
     // restore
     private final int countdownSeconds;
@@ -109,6 +110,9 @@ public final class BackupSettings {
         this.protectManual = cfg.getBoolean("retention.protect-manual", true);
         this.maxProtected = Math.max(0, cfg.getInt("retention.max-protected", 10));
         this.minFreeDiskBytes = Math.max(0L, cfg.getLong("retention.min-free-disk-gb", 5)) * 1024L * 1024L * 1024L;
+        // 소수점을 허용한다. 작은 서버는 0.5(=512MB) 처럼 잡고 싶을 수 있다.
+        this.maxTotalBytes = (long) (Math.max(0.0, cfg.getDouble("retention.max-total-size-gb", 0))
+                * 1024L * 1024L * 1024L);
 
         this.countdownSeconds = Math.max(0, cfg.getInt("restore.countdown-seconds", 15));
         this.safetyBackup = cfg.getBoolean("restore.create-safety-backup", true);
@@ -266,6 +270,18 @@ public final class BackupSettings {
     public int maxProtected() { return maxProtected; }
 
     public long minFreeDiskBytes() { return minFreeDiskBytes; }
+
+    /**
+     * 백업 폴더 전체가 넘지 말아야 할 크기. (0 = 무제한)
+     *
+     * <p>{@link #minFreeDiskBytes()} 는 파일시스템에 남은 공간을 묻는데, 컨테이너로 돌아가는
+     * 호스팅에서는 그 값이 <b>호스트 디스크</b>를 가리켜 정작 걸려 있는 할당량을 못 본다.
+     * 그러면 백업이 할당량을 향해 자라도 아무도 막지 않는다. 이 값은 백업 폴더 크기를
+     * 직접 재서 지키므로 그런 환경에서도 동작한다.</p>
+     *
+     * <p>계단 설정을 잘못 잡아 예상보다 많이 쌓이는 경우에도 마지막 방어선이 된다.</p>
+     */
+    public long maxTotalBytes() { return maxTotalBytes; }
 
     public int countdownSeconds() { return countdownSeconds; }
 

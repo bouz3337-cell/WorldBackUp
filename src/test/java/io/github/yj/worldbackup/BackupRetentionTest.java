@@ -348,6 +348,95 @@ class BackupRetentionTest {
     }
 
     // ------------------------------------------------------------------
+    // 총 용량 상한
+
+    /**
+     * 컨테이너 호스팅에서는 {@code min-free-disk-gb} 가 할당량을 못 본다.
+     * 백업 폴더 크기를 직접 재서 지키는 상한이 마지막 방어선이다.
+     */
+    /** 1 MB 짜리 백업 6개 = 6 MB. 상한을 3.5 MB 로 잡으면 3개만 들어간다. */
+    private static final int ONE_MB = 1024 * 1024;
+    private static final double CAP_3_5_MB = 3.5 / 1024.0;   // GB 단위
+    private static final double CAP_TINY = 0.0000001;        // 사실상 0 - 아무것도 못 담는다
+
+    @Test
+    void totalSizeCapDeletesOldestUntilItFits() throws Exception {
+        BackupRepository repo = repository();
+        for (int i = 1; i <= 6; i++) {
+            putSized(repo, "b" + i, at(i, 12), ONE_MB);
+        }
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-total-size-gb", CAP_3_5_MB);
+            cfg.set("retention.min-backups", 0);
+        }));
+
+        // b1 이 가장 최근(1일 전), b6 이 가장 오래됨(6일 전). 오래된 것부터 지운다.
+        assertEquals(List.of("b1", "b2", "b3"), ids(repo), "상한에 맞춰 오래된 것부터 지운다");
+    }
+
+    @Test
+    void totalSizeCapIsIgnoredWhenSetToZero() throws Exception {
+        BackupRepository repo = repository();
+        for (int i = 1; i <= 6; i++) {
+            putSized(repo, "b" + i, at(i, 12), ONE_MB);
+        }
+
+        repo.prune(settings(cfg -> cfg.set("retention.max-total-size-gb", 0)));
+
+        assertEquals(6, ids(repo).size(), "상한이 0 이면 아무것도 하지 않는다");
+    }
+
+    /** 상한을 맞추려다 되돌릴 백업을 다 지우면 안 된다. 최소 보관 개수가 우선이다. */
+    @Test
+    void minBackupsWinsOverTheTotalSizeCap() throws Exception {
+        BackupRepository repo = repository();
+        for (int i = 1; i <= 6; i++) {
+            putSized(repo, "b" + i, at(i, 12), ONE_MB);
+        }
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-total-size-gb", CAP_TINY); // 어떻게 해도 못 맞춘다
+            cfg.set("retention.min-backups", 3);
+        }));
+
+        assertEquals(3, ids(repo).size(), "용량보다 최소 보관 개수가 우선한다");
+    }
+
+    /** /wb lock 은 어떤 정책보다도 세다. 총 용량 상한도 예외가 아니다. */
+    @Test
+    void lockedBackupsSurviveTheTotalSizeCap() throws Exception {
+        BackupRepository repo = repository();
+        BackupEntry locked = putSized(repo, "locked", at(9, 12), ONE_MB);
+        assertTrue(repo.setLocked(locked, true));
+        putSized(repo, "b1", at(1, 12), ONE_MB);
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-total-size-gb", CAP_TINY);
+            cfg.set("retention.min-backups", 0);
+        }));
+
+        assertTrue(ids(repo).contains("locked"), "잠근 백업은 용량 상한으로도 지우지 않는다");
+    }
+
+    /**
+     * 지정한 크기의 백업을 심는다.
+     *
+     * <p>{@code archiveBytes} 는 메타데이터가 아니라 <b>실제 파일 크기</b>에서 읽으므로,
+     * 크기를 흉내 내려면 그만큼을 실제로 써야 한다.</p>
+     */
+    private BackupEntry putSized(BackupRepository repo, String id, Instant createdAt, int bytes)
+            throws IOException {
+        Path archive = repo.directory().resolve(BackupEntry.archiveName(id));
+        Files.write(archive, new byte[bytes]);
+        BackupEntry entry = new BackupEntry(id, archive, createdAt, BackupType.SCHEDULED, null,
+                Files.size(archive), 0L, 0, List.of("world"), List.of("world"), List.of(),
+                "test", false, true, null, true);
+        repo.writeMeta(entry);
+        return entry;
+    }
+
+    // ------------------------------------------------------------------
     // 플레이어 데이터 포함 여부 기록
 
     /**

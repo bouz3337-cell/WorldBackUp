@@ -589,8 +589,15 @@ public final class WorldBackUpCommand {
         plugin.backupService().lastError().ifPresent(error ->
                 Msg.sendRaw(sender, " <gray>최근 오류:</gray> <red>" + Msg.sanitize(error) + "</red>"));
 
+        String cap = "";
+        if (settings.maxTotalBytes() > 0) {
+            int percent = (int) Math.min(999, totalBytes * 100L / settings.maxTotalBytes());
+            String color = percent >= 90 ? "<red>" : percent >= 70 ? "<yellow>" : "<green>";
+            cap = " " + color + percent + "%</" + colorTag(color) + "> <dark_gray>of "
+                    + FileUtil.humanBytes(settings.maxTotalBytes()) + " 상한</dark_gray>";
+        }
         Msg.sendRaw(sender, " <gray>보관 중  :</gray> <white>" + entries.size() + "개</white> <dark_gray>("
-                + FileUtil.humanBytes(totalBytes) + ")</dark_gray>");
+                + FileUtil.humanBytes(totalBytes) + ")</dark_gray>" + cap);
         Msg.sendRaw(sender, " <gray>저장 위치:</gray> <white>" + settings.backupDir() + "</white>");
         Msg.sendRaw(sender, " <gray>디스크   :</gray> <white>"
                 + FileUtil.humanBytes(FileUtil.usableSpace(settings.backupDir())) + " 남음</white>");

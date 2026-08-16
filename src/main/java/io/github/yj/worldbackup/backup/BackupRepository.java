@@ -484,6 +484,7 @@ public final class BackupRepository {
         }
 
         rescueToMinimum(settings, all, byId, toDelete);
+        enforceTotalSize(settings, all, dependentsByBase, toDelete);
 
         // 최종 결과가 정해진 뒤에 한 번만 알린다. (위 루프는 같은 항목을 여러 번 검사한다)
         for (BackupEntry base : heldBack) {
@@ -553,6 +554,62 @@ public final class BackupRepository {
         if (!rescued.isEmpty()) {
             log.info("[백업] 최소 보관 개수(" + settings.minBackups() + "개)를 지키기 위해 "
                     + rescued.size() + "개를 남깁니다: " + String.join(", ", rescued));
+        }
+    }
+
+    /**
+     * 백업 폴더 전체 크기를 상한 아래로 되돌린다.
+     *
+     * <p>{@code min-free-disk-gb} 는 파일시스템에 남은 공간을 묻는데, 컨테이너 호스팅에서는
+     * 그 값이 호스트 디스크를 가리켜 정작 걸려 있는 할당량을 못 본다. 여기서는 백업 크기를
+     * 직접 재므로 그런 환경에서도 동작하고, 계단 설정을 잘못 잡아 예상보다 많이 쌓이는
+     * 경우에도 마지막 방어선이 된다.</p>
+     *
+     * <p>다만 {@code /wb lock} 과 최소 보관 개수는 이 상한보다 <b>우선한다.</b> 용량을 맞추려다
+     * 되돌릴 백업을 하나도 안 남기는 것이 더 나쁜 결과이기 때문이다. 그래서 상한을 못 맞추면
+     * 조용히 넘어가지 않고 알린다.</p>
+     */
+    private void enforceTotalSize(BackupSettings settings,
+                                  List<BackupEntry> all,
+                                  Map<String, List<BackupEntry>> dependentsByBase,
+                                  Set<BackupEntry> toDelete) {
+        if (settings.maxTotalBytes() <= 0) return;
+
+        List<BackupEntry> survivors = new ArrayList<>();
+        long total = 0L;
+        int completeLeft = 0;
+        for (BackupEntry entry : all) {
+            if (toDelete.contains(entry)) continue;
+            survivors.add(entry);
+            total += entry.archiveBytes();
+            if (entry.complete()) completeLeft++;
+        }
+        if (total <= settings.maxTotalBytes()) return;
+
+        long before = total;
+        List<String> removed = new ArrayList<>();
+        for (int i = survivors.size() - 1; i >= 0 && total > settings.maxTotalBytes(); i--) {
+            BackupEntry entry = survivors.get(i); // 오래된 것부터
+            if (isPinned(entry)) continue;
+            if (entry.protectedFrom(settings.protectManual())) continue;
+            if (blockingDependent(entry, dependentsByBase, toDelete) != null) continue;
+            if (entry.complete() && completeLeft <= settings.minBackups()) break;
+
+            toDelete.add(entry);
+            total -= entry.archiveBytes();
+            if (entry.complete()) completeLeft--;
+            removed.add(entry.id());
+        }
+
+        if (!removed.isEmpty()) {
+            log.warning("[백업] 총 용량 상한(" + FileUtil.humanBytes(settings.maxTotalBytes()) + ")을 넘어("
+                    + FileUtil.humanBytes(before) + ") 오래된 백업 " + removed.size() + "개를 더 정리합니다: "
+                    + String.join(", ", removed));
+        }
+        if (total > settings.maxTotalBytes()) {
+            log.severe("[백업] 총 용량이 상한을 넘었지만 더 지울 수 있는 백업이 없습니다 ("
+                    + FileUtil.humanBytes(total) + " > " + FileUtil.humanBytes(settings.maxTotalBytes())
+                    + "). 보호된 백업을 풀거나 상한을 올리세요.");
         }
     }
 
