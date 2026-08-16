@@ -1,14 +1,17 @@
 package io.github.yj.worldbackup.config;
 
+import io.github.yj.worldbackup.backup.RetentionTiers;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.GlobMatcher;
 import org.bukkit.configuration.file.FileConfiguration;
 
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 
 /** config.yml 을 읽어들인 불변 설정 스냅샷. */
 public final class BackupSettings {
@@ -35,6 +38,7 @@ public final class BackupSettings {
     private final GlobMatcher exclude;
 
     // retention
+    private final List<RetentionTiers.Tier> tiers;
     private final int maxBackups;
     private final int minBackups;
     private final int maxAgeDays;
@@ -88,6 +92,7 @@ public final class BackupSettings {
         this.excludePatterns = List.copyOf(excludes);
         this.exclude = new GlobMatcher(excludes);
 
+        this.tiers = readTiers(cfg);
         this.maxBackups = Math.max(0, cfg.getInt("retention.max-backups", 48));
         this.minBackups = Math.max(0, cfg.getInt("retention.min-backups", 5));
         this.maxAgeDays = Math.max(0, cfg.getInt("retention.max-age-days", 14));
@@ -118,6 +123,45 @@ public final class BackupSettings {
         if (!excludes.contains(relative)) excludes.add(relative);
         String subtree = relative + "/**";
         if (!excludes.contains(subtree)) excludes.add(subtree);
+    }
+
+    /**
+     * {@code retention.tiers} 를 읽는다. 비어 있으면 예전 정책(max-backups/max-age-days/keep-daily)을 쓴다.
+     *
+     * <p>형식이 깨진 항목은 조용히 버리지 않고 건너뛰되, 하나라도 제대로 읽히면 계단식으로 동작한다.
+     * 전부 깨졌다면 빈 목록이 되어 예전 정책으로 돌아가므로 백업이 통째로 정리되는 일은 없다.</p>
+     */
+    private static List<RetentionTiers.Tier> readTiers(FileConfiguration cfg) {
+        List<RetentionTiers.Tier> tiers = new ArrayList<>();
+        for (Map<?, ?> raw : cfg.getMapList("retention.tiers")) {
+            Duration every = parseDuration(String.valueOf(raw.get("every")));
+            if (every == null) continue;
+            int keep = raw.get("keep") instanceof Number number ? number.intValue() : 0;
+            if (keep <= 0) continue;
+            tiers.add(new RetentionTiers.Tier(every, keep));
+        }
+        return List.copyOf(tiers);
+    }
+
+    /** {@code 0}, {@code 15m}, {@code 6h}, {@code 3d}. 해석 못 하면 null. */
+    private static Duration parseDuration(String text) {
+        if (text == null) return null;
+        String value = text.trim().toLowerCase(Locale.ROOT);
+        if (value.equals("0")) return Duration.ZERO;
+        if (value.length() < 2) return null;
+        char unit = value.charAt(value.length() - 1);
+        try {
+            long amount = Long.parseLong(value.substring(0, value.length() - 1));
+            if (amount < 0) return null;
+            return switch (unit) {
+                case 'm' -> Duration.ofMinutes(amount);
+                case 'h' -> Duration.ofHours(amount);
+                case 'd' -> Duration.ofDays(amount);
+                default -> null;
+            };
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
     private static List<String> lower(List<String> values) {
@@ -165,6 +209,14 @@ public final class BackupSettings {
     public List<String> excludePatterns() { return excludePatterns; }
 
     public GlobMatcher exclude() { return exclude; }
+
+    /**
+     * 계단식 보관 설정. 비어 있으면 {@code max-backups}/{@code max-age-days}/{@code keep-daily} 를 쓴다.
+     *
+     * <p>둘을 섞지 않는다. 계단이 남길 것을 이미 정하는데 개수·나이 상한이 그 위에서 또 깎으면,
+     * 관리자가 기대한 시간대가 조용히 비어 버린다.</p>
+     */
+    public List<RetentionTiers.Tier> tiers() { return tiers; }
 
     public int maxBackups() { return maxBackups; }
 

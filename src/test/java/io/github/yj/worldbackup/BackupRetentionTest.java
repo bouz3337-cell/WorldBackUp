@@ -16,6 +16,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 
@@ -258,6 +259,68 @@ class BackupRetentionTest {
         }));
 
         assertEquals(List.of("healthy"), ids(repo), "멀쩡한 백업이 하한선을 채워야 한다");
+    }
+
+    // ------------------------------------------------------------------
+    // 계단식 보관
+
+    /** 계단을 켜면 max-backups·max-age-days·keep-daily 대신 계단이 판단한다. */
+    @Test
+    void tiersReplaceTheOlderRetentionKnobs() throws Exception {
+        BackupRepository repo = repository();
+        for (int hour = 0; hour < 12; hour++) {
+            put(repo, "h" + hour, Instant.now().minusSeconds(hour * 3600L), BackupType.SCHEDULED, null);
+        }
+
+        repo.prune(settings(cfg -> {
+            // 최근 2개는 무조건, 그다음 6시간 단위로 2구간
+            cfg.set("retention.tiers", List.of(
+                    Map.of("every", "0", "keep", 2),
+                    Map.of("every", "6h", "keep", 2)));
+            // 계단을 켜면 아래 값들은 무시되어야 한다.
+            cfg.set("retention.max-backups", 100);
+            cfg.set("retention.max-age-days", 3650);
+            cfg.set("retention.keep-daily", 30);
+        }));
+
+        List<String> left = ids(repo);
+        assertTrue(left.contains("h0"), "최근 것은 남는다");
+        assertTrue(left.contains("h1"));
+        assertTrue(left.size() < 12, "계단이 오래된 것을 솎아내야 한다: " + left);
+        assertFalse(left.contains("h11"), "마지막 계단 밖은 지워진다");
+    }
+
+    /** 형식이 깨진 계단은 무시하고, 하나도 못 읽으면 예전 정책으로 돌아간다. */
+    @Test
+    void brokenTierEntriesFallBackToTheOlderPolicy() throws Exception {
+        BackupRepository repo = repository();
+        put(repo, "old", at(30, 12), BackupType.SCHEDULED, null);
+        put(repo, "recent", at(1, 12), BackupType.SCHEDULED, null);
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.tiers", List.of(
+                    Map.of("every", "이상한값", "keep", 5),
+                    Map.of("every", "6h", "keep", 0)));
+            cfg.set("retention.max-age-days", 14);
+        }));
+
+        assertEquals(List.of("recent"), ids(repo), "계단을 못 읽으면 max-age-days 가 그대로 동작한다");
+    }
+
+    /** 계단이 다 솎아내도 최소 보관 개수는 지켜야 한다. */
+    @Test
+    void minBackupsStillAppliesUnderTiers() throws Exception {
+        BackupRepository repo = repository();
+        for (int day = 1; day <= 6; day++) {
+            put(repo, "d" + day, at(day * 30, 12), BackupType.SCHEDULED, null);
+        }
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.tiers", List.of(Map.of("every", "1h", "keep", 1)));
+            cfg.set("retention.min-backups", 3);
+        }));
+
+        assertEquals(3, ids(repo).size(), "계단 밖이어도 하한선은 남는다: " + ids(repo));
     }
 
     // ------------------------------------------------------------------

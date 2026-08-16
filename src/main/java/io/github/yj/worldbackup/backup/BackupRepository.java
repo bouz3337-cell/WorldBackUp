@@ -165,6 +165,19 @@ public final class BackupRepository {
         return entries.stream().filter(e -> e.id().equalsIgnoreCase(normalized)).findFirst();
     }
 
+    /**
+     * 이 시각 <b>이전</b>의 가장 최근 백업.
+     *
+     * <p>"이전" 이라는 점이 중요하다. 테러가 난 시각을 말했는데 그 이후 백업을 골라 주면
+     * 피해가 담긴 상태로 되돌리게 된다. 요청한 시각을 넘기느니 조금 더 과거로 가는 편이 안전하다.</p>
+     */
+    public Optional<BackupEntry> resolveAtOrBefore(Instant target) {
+        return list().stream()
+                .filter(BackupEntry::complete)
+                .filter(entry -> !entry.createdAt().isAfter(target))
+                .findFirst(); // 최신순이라 첫 항목이 가장 가까운 과거다
+    }
+
     public Optional<BackupEntry> read(Path archive) {
         String id = BackupEntry.idFromArchive(archive);
         if (id == null) return Optional.empty();
@@ -375,8 +388,14 @@ public final class BackupRepository {
         List<BackupEntry> all = list(); // 최신순
         if (all.isEmpty()) return new PruneResult(0, 0L, List.of());
 
+        boolean tiered = !settings.tiers().isEmpty();
+
         Set<String> keep = new HashSet<>();
-        if (settings.keepDaily() > 0) {
+        if (tiered) {
+            // 계단이 남길 것을 이미 정한다. keep-daily 는 "그 날의 최신" 을 남기는 규칙이라
+            // 새벽에 사고가 나면 피해가 담긴 백업만 남겨 놓는다. 계단이 그 자리를 대신한다.
+            keep.addAll(RetentionTiers.select(all, settings.tiers(), Instant.now()));
+        } else if (settings.keepDaily() > 0) {
             LocalDate today = LocalDate.now(ZoneId.systemDefault());
             LocalDate limit = today.minusDays(settings.keepDaily() - 1L);
             Map<LocalDate, BackupEntry> newestPerDay = new HashMap<>();
@@ -409,7 +428,10 @@ public final class BackupRepository {
             }
         }
 
-        if (settings.maxAgeDays() > 0) {
+        if (tiered) {
+            // 어떤 계단에도 들지 못한 것은 전부 정리 대상이다.
+            toDelete.addAll(deletable);
+        } else if (settings.maxAgeDays() > 0) {
             Instant cutoff = Instant.now().minusSeconds(settings.maxAgeDays() * 86400L);
             for (BackupEntry entry : deletable) {
                 if (entry.createdAt().isBefore(cutoff)) toDelete.add(entry);
@@ -441,7 +463,7 @@ public final class BackupRepository {
         // 개수 상한은 기준 백업 보호까지 반영된 <b>뒤에</b> 채운다. 예전에는 상한을 먼저 계산하고
         // 나중에 기준 백업을 목록에서 빼는 바람에, 실제 삭제 수가 계산보다 적어 max-backups 를
         // 넘긴 채로 끝났다. 한 번 채울 때마다 기준이 풀릴 수 있으므로 변화가 없을 때까지 돈다.
-        if (settings.maxBackups() > 0) {
+        if (!tiered && settings.maxBackups() > 0) {
             boolean added = true;
             while (added) {
                 added = false;

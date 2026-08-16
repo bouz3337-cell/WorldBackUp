@@ -14,12 +14,15 @@ import io.github.yj.worldbackup.config.BackupSettings;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.Msg;
 import io.github.yj.worldbackup.util.Sched;
+import io.github.yj.worldbackup.util.TimeToken;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
 import org.bukkit.command.CommandSender;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Optional;
 
@@ -123,10 +126,15 @@ public final class WorldBackUpCommand {
         void accept(CommandSender sender, BackupEntry entry);
     }
 
+    /** 시각 표현을 ID 보다 앞에 둔다. 사고를 발견한 사람이 아는 것은 ID 가 아니라 시각이다. */
+    private static final List<String> TIME_HINTS = List.of("latest", "30m", "1h", "3h", "6h", "12h", "1d");
+
     private SuggestionProvider<CommandSourceStack> backupSuggestions() {
         return (ctx, builder) -> {
             String prefix = builder.getRemainingLowerCase();
-            if ("latest".startsWith(prefix)) builder.suggest("latest");
+            for (String hint : TIME_HINTS) {
+                if (hint.startsWith(prefix)) builder.suggest(hint);
+            }
             for (String id : backupIds()) {
                 if (id.toLowerCase(java.util.Locale.ROOT).startsWith(prefix)) builder.suggest(id);
             }
@@ -208,8 +216,17 @@ public final class WorldBackUpCommand {
         Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>백업 목록</aqua> <gray>(" + entries.size() + "개, "
                 + FileUtil.humanBytes(totalBytes) + ")</gray> <dark_gray>[" + page + "/" + pages + "]</dark_gray>");
 
+        LocalDate previousDay = null;
         for (int i = from; i < to; i++) {
             BackupEntry entry = entries.get(i);
+
+            // 날짜가 바뀌면 머리글을 넣는다. 사고 시점을 찾을 때 날짜 경계가 보여야 훑기 쉽다.
+            LocalDate day = entry.localDate();
+            if (!day.equals(previousDay)) {
+                previousDay = day;
+                Msg.sendRaw(sender, "<dark_gray>  " + day + dayLabel(day) + "</dark_gray>");
+            }
+
             String age = FileUtil.humanDuration(Duration.between(entry.createdAt(), Instant.now()));
             String memo = entry.hasLabel() ? " <dark_gray>| <italic>" + Msg.sanitize(entry.label()) + "</italic></dark_gray>" : "";
             String tags = entry.locked() ? " <gold>[보호]</gold>" : "";
@@ -226,6 +243,13 @@ public final class WorldBackUpCommand {
         if (page < pages) {
             Msg.sendRaw(sender, "<click:run_command:'/wb list " + (page + 1) + "'><gray>» 다음 페이지</gray></click>");
         }
+    }
+
+    private String dayLabel(LocalDate day) {
+        LocalDate today = LocalDate.now(ZoneId.systemDefault());
+        if (day.equals(today)) return " (오늘)";
+        if (day.equals(today.minusDays(1))) return " (어제)";
+        return "";
     }
 
     private String colorTag(String openTag) {
@@ -436,10 +460,37 @@ public final class WorldBackUpCommand {
 
     // ------------------------------------------------------------------
 
+    /**
+     * 토큰을 백업 하나로 푼다.
+     *
+     * <p>{@code 9h}, {@code 03:00} 처럼 시각을 말하면 <b>그 시점 이전</b>의 가장 최근 백업을
+     * 고르고, 무엇을 골랐는지 알려 준다. 사고가 난 시각을 말했는데 그 이후 백업이 잡히면
+     * 피해가 담긴 상태로 되돌리게 되므로, 요청을 넘기느니 조금 더 과거로 간다.</p>
+     */
     private Optional<BackupEntry> resolve(CommandSender sender, String token) {
+        Instant target = TimeToken.parse(token);
+        if (target != null) {
+            Optional<BackupEntry> found = plugin.repository().resolveAtOrBefore(target);
+            if (found.isEmpty()) {
+                Msg.send(sender, "<red><white>" + BackupEntry.DISPLAY_FORMAT.format(target)
+                        + "</white> 이전의 백업이 없습니다.</red>");
+                Msg.send(sender, "<gray>가장 오래된 백업보다 더 과거를 요청하셨습니다. "
+                        + "<white>/wb list</white> 로 보관 범위를 확인하세요.</gray>");
+                return found;
+            }
+            BackupEntry entry = found.get();
+            String gap = FileUtil.humanDuration(Duration.between(entry.createdAt(), target));
+            Msg.send(sender, "<gray>요청 <white>" + BackupEntry.DISPLAY_FORMAT.format(target)
+                    + "</white> → 그 이전 가장 최근 백업 <white>" + entry.displayTime()
+                    + "</white> <dark_gray>(" + gap + " 더 과거)</dark_gray></gray>");
+            return found;
+        }
+
         Optional<BackupEntry> found = plugin.repository().resolve(token);
         if (found.isEmpty()) {
             Msg.send(sender, "<red>백업을 찾을 수 없습니다: <white>" + Msg.sanitize(token) + "</white></red>");
+            Msg.send(sender, "<gray>ID·<white>#번호</white>·<white>latest</white> 외에 "
+                    + "<white>9h</white>(9시간 전), <white>03:00</white>(그 시각) 도 됩니다.</gray>");
         }
         return found;
     }
