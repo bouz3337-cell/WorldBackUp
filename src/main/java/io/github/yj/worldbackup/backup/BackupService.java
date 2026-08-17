@@ -120,8 +120,11 @@ public final class BackupService {
         int skipped = skippedCycles.incrementAndGet();
         if (skipped < limit) return true;
 
-        server.logger().info("[백업] 변경이 없어 보이지만 " + skipped
-                + "번 연속으로 건너뛰었습니다. 이번 주기는 백업합니다.");
+        // "건너뛰었다" 고 하면 안 된다. 이 값은 판단 대상인 이번 주기까지 센 것이라, 실제로
+        // 건너뛴 주기는 하나 적다. 백업이 limit 주기마다 떨어진다는 동작은 맞지만 (그래서
+        // config.yml 의 "48 = 하루에 한 번" 도 맞다) 문장은 사실대로 적는다.
+        server.logger().info("[백업] 변경이 없는 주기가 " + skipped
+                + "번 이어졌습니다. 이번 주기는 백업합니다.");
         skippedCycles.set(0);
         return false;
     }
