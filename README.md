@@ -1,5 +1,7 @@
 # WorldBackUp
 
+[![build](https://github.com/bouz3337-cell/WorldBackUp/actions/workflows/build.yml/badge.svg)](https://github.com/bouz3337-cell/WorldBackUp/actions/workflows/build.yml)
+
 마인크래프트 **26.2** 서버용 자동 백업 / 롤백 플러그인.
 월드·플레이어 데이터를 일정 주기로 압축 보관하고, 테러(그리핑)를 당하면 원하는 시점으로 서버를 통째로 되돌립니다.
 
@@ -24,14 +26,17 @@
 
 ```bash
 ./gradlew build
-# 결과물: build/libs/WorldBackUp-1.0.0.jar
+# 결과물: build/libs/WorldBackUp-1.1.0.jar
 
 # 서버 plugins 폴더로 바로 복사하려면
 ./gradlew deployPlugin -PserverDir="D:/minecraft/server"
 ```
 
-`build/libs/WorldBackUp-1.0.0.jar` 를 서버의 `plugins/` 폴더에 넣고 재시작하면
+`build/libs/WorldBackUp-1.1.0.jar` 를 서버의 `plugins/` 폴더에 넣고 재시작하면
 `plugins/WorldBackUp/config.yml` 이 생성됩니다.
+
+빌드하지 않고 쓰시려면 [Releases](https://github.com/bouz3337-cell/WorldBackUp/releases) 에서
+jar 를 내려받으세요. 버전을 올릴 때 무엇이 바뀌는지는 [CHANGELOG.md](CHANGELOG.md) 에 있습니다.
 
 ## 3. 명령어
 
@@ -183,73 +188,17 @@
 **③ 서버 재시작 래퍼**
 
 `/wb confirm` 이후 서버는 스스로 꺼지므로, 누군가 다시 켜야 복원이 적용됩니다.
+바로 쓸 수 있는 것을 [`extras/`](extras/) 에 넣어 두었습니다.
 
-<details>
-<summary>Windows (<code>run-server.ps1</code>)</summary>
+| 파일 | 쓰는 법 |
+|---|---|
+| [`extras/run-server.ps1`](extras/run-server.ps1) | 서버 폴더에 두고 실행. 끌 때는 `STOP` 빈 파일을 만든 뒤 `/stop` |
+| [`extras/minecraft.service`](extras/minecraft.service) | `/etc/systemd/system/` 에 복사 후 `systemctl enable --now minecraft` |
 
-```powershell
-$ServerDir = $PSScriptRoot
-$JavaArgs  = @('-Xms4G','-Xmx4G','-jar','paper-26.2.jar','nogui')
-$StopFile  = Join-Path $ServerDir 'STOP'
-$DataDir   = Join-Path $ServerDir 'plugins\WorldBackUp'
-$crashes   = 0
-
-while ($true) {
-    if (Test-Path $StopFile) { Write-Host '[run] STOP 파일이 있어 종료합니다.'; break }
-
-    # 복원 예약이 걸린 채 꺼지는 것인지 미리 봐 둔다 (이건 정상 종료다)
-    $restorePending = Test-Path (Join-Path $DataDir 'pending-restore.yml')
-    $started = Get-Date
-    & java @JavaArgs
-    $ranFor = (Get-Date) - $started
-
-    if (Test-Path $StopFile) { break }
-
-    # 복원 실패 표식이 생겼으면 사람이 볼 때까지 멈춘다.
-    if (Get-ChildItem $DataDir -Filter 'restore-failed-*.yml' -ErrorAction SilentlyContinue) {
-        Write-Host '[run] 복원이 실패했습니다. 자동 재시작을 중단합니다. 월드를 확인하세요.'
-        break
-    }
-
-    if ($restorePending) { Write-Host '[run] 복원 적용을 위해 재시작합니다.'; $crashes = 0; continue }
-
-    if ($ranFor.TotalSeconds -lt 60) {
-        $crashes++
-        if ($crashes -ge 3) { Write-Host '[run] 크래시 루프로 판단해 멈춥니다.'; break }
-    } else { $crashes = 0 }
-
-    Write-Host '[run] 5초 후 재시작합니다.'
-    Start-Sleep -Seconds 5
-}
-```
-
-서버를 완전히 끄려면 `STOP` 파일을 만든 뒤 `/stop` 하세요.
-</details>
-
-<details>
-<summary>Linux (systemd)</summary>
-
-```ini
-[Unit]
-Description=Minecraft Paper
-After=network.target
-StartLimitIntervalSec=300
-StartLimitBurst=5          # 5분에 5회 넘게 죽으면 중단 (크래시 루프 방지)
-
-[Service]
-Type=simple
-User=minecraft
-WorkingDirectory=/srv/minecraft
-ExecStart=/usr/bin/java -Xms4G -Xmx4G -jar paper-26.2.jar nogui
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-`Restart=always` 라 `/stop` 으로도 다시 켜집니다. 정말 끌 때는 `systemctl stop minecraft` 를 쓰세요.
-</details>
+둘 다 자기 파일 맨 위에 java 인자(메모리·jar 이름)가 있으니 서버에 맞게 고치세요.
+PowerShell 쪽은 **복원이 실패하면 자동 재시작을 멈춥니다** — 사람이 월드를 확인해야 하는
+상황에서 그대로 다시 켜면 반쯤 복원된 월드로 서버가 계속 돌아가기 때문입니다.
+크래시 루프(1분 내 3회 사망)도 멈춥니다.
 
 **무인 운영 권장 설정**
 
@@ -511,6 +460,17 @@ retention:
   > (그때는 `targets.extra-paths` 에 실제 경로를 넣어 주세요.)
 - `ops.json`, `whitelist.json`, `banned-players.json`, `usercache.json`, `server.properties` 등 서버 파일
 - `targets.extra-paths` 에 지정한 플러그인 데이터 폴더
+- **이 플러그인의 `config.yml`** — 담지 않으면 서버를 되돌려도 그 시점의 보관 정책은
+  되돌아오지 않습니다. 백업이 어떻게 만들어졌는지가 정작 백업 안에 없는 셈입니다.
+
+  > 복원하면 이 파일도 그 시점 것으로 바뀝니다. 그 뒤 `backup.directory` 같은 값이 예전으로
+  > 돌아갈 수 있으니 복원 후 `/wb status` 로 한 번 확인하세요. 원치 않으면 `targets.exclude` 에
+  > `"plugins/WorldBackUp/config.yml"` 을 넣으면 됩니다.
+  >
+  > 반대로 플러그인이 **스스로 만들어 쓰는 것**(`backups/`, `replaced/`, 복원 예약 파일,
+  > 실패 표식)은 절대 담기지 않습니다. 담기면 복원이 그것을 되살리는데, 복원 예약이 되살아나면
+  > 다음 부팅이 **또 복원을 시작하고**, 실패 표식이 되살아나면 아무도 손대지 않은 서버에서
+  > 자동 백업이 영구히 멈춥니다.
 
 > `extra-paths` 에 이미 백업되는 월드의 하위 경로(`world/playerdata` 등)를 적어도 괜찮습니다.
 > 겹치는 대상은 상위 경로 하나로 합쳐지고, 어떤 항목이 합쳐졌는지 콘솔에 남습니다.
@@ -627,6 +587,10 @@ retention:
 ./gradlew test
 ```
 
+푸시와 PR 마다 [GitHub Actions](.github/workflows/build.yml) 가 JDK 25 에서 같은 명령을 돌립니다.
+테스트가 백여 개 있어도 자동으로 돌지 않으면 "돌렸다고 믿는 것"에 그치고, 여기서 검증하는 것들은
+대부분 잘못되면 **조용히** 데이터를 잃는 분기라 회귀를 사람 손에 맡기지 않았습니다.
+
 - `BackupRestoreRoundTripTest` — 백업 → 지형 삭제/인벤토리 초기화/파일 추가(테러 재현) → 복원 → 원상복구 검증,
   중단된 복원의 무한 루프 방지, zip slip 방어, 차등 백업의 스냅샷 정확성(삭제된 파일·빈 폴더가 되살아나지 않는지),
   보존 대상 폴더는 비어 있어도 복원이 지우지 않는지
@@ -641,6 +605,12 @@ retention:
   `/wb lock` 의 절대 보호, 차등본이 살아 있는 기준 백업 보존, 총 용량 상한, 공간 확보의 최소 개수 하한,
   남은 임시 파일 정리, 목록 캐시가 스캔 중의 변경을 되살리지 않는지(스레드를 붙잡아 재현)
 - `RetentionTiersTest` — 계단식 보관의 구간 나누기. 대표 선정(전체 백업 우선·손상 제외), 미래 시각 백업, 이력의 공백
+- `RestoreDecisionTest` — 복원을 **확정하기 전에** 내리는 판단. `worlds` 가 월드만 고르는지
+  (새면 `server.properties` 까지 되돌아갑니다), 월드를 못 찾으면 전체로 넓히지 않고 빈 목록을 주는지,
+  백업에서 제외했던 것이 복원에서도 보존되는지, 공간 점검이 경계와 "기록 없는 옛 백업" 에서 관대한지
+- `OwnDataFolderExclusionTest` — 플러그인 자기 폴더에서 무엇을 담고 무엇을 빼는지. 이 경계는
+  **양쪽으로** 위험하다 — 넓으면 `config.yml` 이 빠져 보관 정책을 복원할 수 없고, 좁으면 복원 예약이나
+  실패 표식이 담겼다가 복원으로 되살아난다. 저장 위치를 옮긴 뒤에도 옛 아카이브가 계속 제외되는지까지 확인
 - `PlayerDataTest` — 인벤토리 폴더 탐색. `players`/`playerdata` 양쪽 배치, 플러그인 폴더 오탐 방지
 - `WorldLayoutTest` — 차원 폴더에서 진짜 월드 폴더로 올라가기
 - `SuggestionHintTest` — 탭 완성 설명이 명령이 실제로 고르는 백업과 일치하는지.
@@ -654,3 +624,16 @@ retention:
 > 하나로 모아 두었습니다. `BackupService` 는 이 인터페이스만 보고 돌기 때문에, 지우고 되돌리는 판단을
 > Paper 없이 검증할 수 있습니다. 실서버 구현은
 > [`PaperServerBridge`](src/main/java/io/github/yj/worldbackup/PaperServerBridge.java) 한 곳뿐입니다.
+>
+> 서버 없이는 돌릴 수 없는 흐름(명령어 트리, 복원 확정 → 카운트다운 → 종료)에서도 **판단만은**
+> 순수 함수로 떼어 내 테스트합니다. `hasAmpleRoom`·`hasRoomToRestore`·`selectedRoots` 처럼
+> `public static` 인 것들이 그것이고, 각 메서드의 주석에 "왜 public 인가" 가 적혀 있습니다.
+
+## 11. 라이선스
+
+[MIT](LICENSE). 마음대로 쓰고 고치고 배포하셔도 됩니다.
+
+백업 도구인 만큼 한 가지만 적어 둡니다 — 이 플러그인은 **보증 없이** 제공됩니다.
+디스크가 하나뿐이면 그 디스크가 죽는 날 월드와 백업이 함께 사라집니다.
+`backup.directory` 를 다른 물리 디스크로 두고, 정말 중요한 서버라면 백업 폴더를 외부로
+복사하는 절차를 따로 마련하세요. 그 복사는 이 플러그인이 하지 않습니다.
