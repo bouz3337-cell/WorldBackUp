@@ -1,9 +1,14 @@
 package io.github.yj.worldbackup.command;
 
+import com.mojang.brigadier.LiteralMessage;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import com.mojang.brigadier.context.CommandContext;
+import com.mojang.brigadier.context.StringRange;
+import com.mojang.brigadier.suggestion.Suggestion;
 import com.mojang.brigadier.suggestion.SuggestionProvider;
+import com.mojang.brigadier.suggestion.Suggestions;
+import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import com.mojang.brigadier.tree.LiteralCommandNode;
 import io.github.yj.worldbackup.WorldBackUpPlugin;
 import io.github.yj.worldbackup.backup.BackupEntry;
@@ -30,9 +35,11 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * Brigadier 로 등록하는 {@code /worldbackup} 명령어.
@@ -54,15 +61,6 @@ public final class WorldBackUpCommand {
             DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault());
 
     private final WorldBackUpPlugin plugin;
-
-    /**
-     * 탭 완성용 백업 ID 캐시 (5초). 매번 디스크를 읽지 않기 위함.
-     *
-     * <p>제안 계산이 메인 스레드에서 돈다는 보장이 없어 {@code volatile} 로 둔다.
-     * 값이 조금 낡는 것은 상관없지만, 다른 스레드가 쓴 리스트를 절반만 보는 것은 곤란하다.</p>
-     */
-    private volatile List<String> cachedIds = List.of();
-    private volatile long cachedAt;
 
     public WorldBackUpCommand(WorldBackUpPlugin plugin) {
         this.plugin = plugin;
@@ -156,35 +154,179 @@ public final class WorldBackUpCommand {
         void accept(CommandSender sender, BackupEntry entry);
     }
 
-    /** 시각 표현을 ID 보다 앞에 둔다. 사고를 발견한 사람이 아는 것은 ID 가 아니라 시각이다. */
-    private static final List<String> TIME_HINTS = List.of("latest", "30m", "1h", "3h", "6h", "12h", "1d");
+    /**
+     * 탭 완성에 띄우는 시각 표현.
+     *
+     * @param token 실제로 입력될 문자열
+     * @param label 사람이 읽는 이름
+     * @param back  얼마나 과거인지. {@code null} 이면 "가장 최근".
+     */
+    record TimeHint(String token, String label, Duration back) {
 
-    /** 백업이 실제로 있는 날짜를 제안한다. 없는 날을 뒤지게 두지 않는다. */
+        /**
+         * 이 토큰이 <b>실제로</b> 가리키는 백업.
+         *
+         * <p>{@link BackupRepository#resolveAtOrBefore(Instant)} 와 <b>같은 규칙</b>이어야 한다.
+         * 설명에 적힌 시각과 실제로 복원되는 시각이 어긋나면, 툴팁을 믿고 고른 사람이
+         * 엉뚱한 시점으로 되돌아간다.</p>
+         */
+        BackupEntry resolve(List<BackupEntry> newestFirst, Instant now) {
+            if (back == null) {
+                return newestFirst.isEmpty() ? null : newestFirst.get(0);
+            }
+            Instant target = now.minus(back);
+            for (BackupEntry entry : newestFirst) { // 최신순이라 첫 항목이 가장 가까운 과거
+                if (entry.complete() && !entry.createdAt().isAfter(target)) return entry;
+            }
+            return null;
+        }
+    }
+
+    /** 시각 표현을 ID 보다 앞에 둔다. 사고를 발견한 사람이 아는 것은 ID 가 아니라 시각이다. */
+    static final List<TimeHint> TIME_HINTS = List.of(
+            new TimeHint("latest", "가장 최근", null),
+            new TimeHint("30m", "30분 전", Duration.ofMinutes(30)),
+            new TimeHint("1h", "1시간 전", Duration.ofHours(1)),
+            new TimeHint("3h", "3시간 전", Duration.ofHours(3)),
+            new TimeHint("6h", "6시간 전", Duration.ofHours(6)),
+            new TimeHint("12h", "12시간 전", Duration.ofHours(12)),
+            new TimeHint("1d", "1일 전", Duration.ofDays(1)),
+            new TimeHint("3d", "3일 전", Duration.ofDays(3)),
+            new TimeHint("7d", "7일 전", Duration.ofDays(7)));
+
+    /** 아무것도 입력하지 않았을 때 보여 줄 백업 ID 개수. */
+    private static final int IDLE_ID_SUGGESTIONS = 5;
+    /** ID 를 직접 치기 시작했을 때의 개수. */
+    private static final int TYPED_ID_SUGGESTIONS = 25;
+    private static final int DAY_SUGGESTIONS = 20;
+
+    /**
+     * 백업이 실제로 있는 날짜를 제안한다. 없는 날을 뒤지게 두지 않는다.
+     *
+     * <p>날짜만 늘어놓으면 어느 날에 무엇이 얼마나 있는지 알 수 없어 결국 하나씩 눌러 봐야 한다.
+     * 개수·시간대·용량을 설명에 함께 띄운다.</p>
+     */
     private SuggestionProvider<CommandSourceStack> listSuggestions() {
         return (ctx, builder) -> {
             String prefix = builder.getRemainingLowerCase();
-            if ("days".startsWith(prefix)) builder.suggest("days");
-            plugin.repository().list().stream()
-                    .map(entry -> entry.localDate().toString())
-                    .distinct()
-                    .filter(date -> date.startsWith(prefix))
-                    .limit(30)
-                    .forEach(builder::suggest);
-            return builder.buildFuture();
+            StringRange range = range(builder);
+            List<Suggestion> out = new ArrayList<>();
+
+            if ("days".startsWith(prefix)) {
+                out.add(hint(range, "days", "날짜별 보유 현황 - 어느 날짜에 몇 개가 있는지"));
+            }
+
+            Map<LocalDate, List<BackupEntry>> byDay = new LinkedHashMap<>(); // 최신순
+            for (BackupEntry entry : plugin.repository().list()) {
+                byDay.computeIfAbsent(entry.localDate(), key -> new ArrayList<>()).add(entry);
+            }
+
+            int shown = 0;
+            for (Map.Entry<LocalDate, List<BackupEntry>> day : byDay.entrySet()) {
+                if (shown >= DAY_SUGGESTIONS) break;
+                String date = day.getKey().toString();
+                if (!date.startsWith(prefix)) continue;
+                out.add(hint(range, date, describeDay(day.getKey(), day.getValue())));
+                shown++;
+            }
+            return ordered(builder, out);
         };
     }
 
+    /**
+     * 백업을 고르는 인자의 탭 완성.
+     *
+     * <p>예전에는 시각 표현과 백업 ID 를 그냥 쏟아 냈다. Brigadier 가 알파벳순으로 정렬하는 탓에
+     * {@code 12h}, {@code 1d}, {@code 20260817-091500}, {@code 30m} 처럼 종류가 뒤섞여 나왔고,
+     * 어느 줄이 무슨 뜻인지도 알 수 없었다. 여기서는 세 가지를 지킨다.</p>
+     * <ul>
+     *   <li><b>종류를 묶는다.</b> 시각 표현이 먼저, 그다음이 ID 다. 정렬을 피하려고
+     *       {@link Suggestions} 를 직접 만든다.</li>
+     *   <li><b>무엇을 가리키는지 적는다.</b> 각 줄에 그 토큰이 실제로 고르게 될 백업의 시각과
+     *       크기가 붙는다. 눌렀을 때 어디로 가는지 모르는 채로 고르게 두지 않는다.</li>
+     *   <li><b>ID 로 화면을 덮지 않는다.</b> 아무것도 입력하지 않았을 때는 최근 몇 개만 보이고,
+     *       ID 를 직접 치기 시작하면 그때 넓게 찾는다.</li>
+     * </ul>
+     */
     private SuggestionProvider<CommandSourceStack> backupSuggestions() {
         return (ctx, builder) -> {
             String prefix = builder.getRemainingLowerCase();
-            for (String hint : TIME_HINTS) {
-                if (hint.startsWith(prefix)) builder.suggest(hint);
+            StringRange range = range(builder);
+            List<Suggestion> out = new ArrayList<>();
+            List<BackupEntry> entries = plugin.repository().list();
+            Instant now = Instant.now();
+
+            // 1) 시각 표현
+            //
+            // 훑어보는 중(입력 없음)일 때는 같은 백업을 가리키는 줄을 하나로 합친다. 보관이
+            // 성긴 구간에서는 여러 시점이 같은 백업 하나로 모이는데, 그걸 다 늘어놓으면
+            // 고를 것이 많은 것처럼 보인다. 반대로 이미 무언가 치고 있다면 그 사람은 특정
+            // 토큰을 완성하려는 것이므로 합치지 않는다 - /wb restore 30m 은 언제나 유효하다.
+            boolean browsing = prefix.isEmpty();
+            Set<String> pointsTo = new HashSet<>();
+            for (TimeHint time : TIME_HINTS) {
+                if (!time.token().startsWith(prefix)) continue;
+                BackupEntry match = time.resolve(entries, now);
+                if (match == null) continue; // 보관 범위 밖이라 고를 수 없다
+                if (browsing && !pointsTo.add(match.id())) continue;
+                out.add(hint(range, time.token(), time.label() + " → " + describe(match)));
             }
-            for (String id : backupIds()) {
-                if (id.toLowerCase(java.util.Locale.ROOT).startsWith(prefix)) builder.suggest(id);
+
+            // 2) 백업 ID
+            int limit = browsing ? IDLE_ID_SUGGESTIONS : TYPED_ID_SUGGESTIONS;
+            int shown = 0;
+            for (BackupEntry entry : entries) {
+                if (shown >= limit) break;
+                if (!entry.id().toLowerCase(Locale.ROOT).startsWith(prefix)) continue;
+                out.add(hint(range, entry.id(), describe(entry)));
+                shown++;
             }
-            return builder.buildFuture();
+            return ordered(builder, out);
         };
+    }
+
+    /** 탭 완성 한 줄에 붙는 설명. 색은 못 쓰지만 평문만으로 충분하다. */
+    private static Suggestion hint(StringRange range, String text, String tooltip) {
+        return new Suggestion(range, text, new LiteralMessage(tooltip));
+    }
+
+    /**
+     * 우리가 정한 순서 그대로 내보낸다.
+     *
+     * <p>{@link SuggestionsBuilder#buildFuture()} 는 결과를 알파벳순으로 정렬해 버려서
+     * 시각 표현과 ID 가 뒤섞인다. 순서가 곧 분류이므로 {@link Suggestions} 를 직접 만든다.</p>
+     */
+    private static CompletableFuture<Suggestions> ordered(SuggestionsBuilder builder, List<Suggestion> list) {
+        return CompletableFuture.completedFuture(new Suggestions(range(builder), List.copyOf(list)));
+    }
+
+    private static StringRange range(SuggestionsBuilder builder) {
+        return StringRange.between(builder.getStart(), builder.getInput().length());
+    }
+
+    /** "언제 · 얼마나 · 어떤 백업인지" 한 줄. 되돌리기 전에 알아야 할 것만 담는다. */
+    static String describe(BackupEntry entry) {
+        StringBuilder text = new StringBuilder(entry.displayTime())
+                .append(" · ").append(FileUtil.humanBytes(entry.archiveBytes()))
+                .append(" · ").append(entry.type().korean());
+        if (entry.isDifferential()) text.append(" · 차등");
+        if (entry.locked()) text.append(" · 보호");
+        if (!entry.complete()) text.append(" · 손상(복원 불가)");
+        if (!entry.hasPlayerData()) {
+            text.append(entry.playerDataUnknown() ? " · 플레이어?" : " · 플레이어 없음");
+        }
+        return text.toString();
+    }
+
+    /** 그 날짜에 무엇이 얼마나 있는지 한 줄. */
+    static String describeDay(LocalDate day, List<BackupEntry> ofDay) {
+        String label = dayLabel(day).trim(); // " (오늘)" -> "(오늘)"
+        String newest = TIME_ONLY.format(ofDay.get(0).createdAt());
+        String oldest = TIME_ONLY.format(ofDay.get(ofDay.size() - 1).createdAt());
+        String span = ofDay.size() == 1 ? newest : oldest + "~" + newest;
+        long bytes = ofDay.stream().mapToLong(BackupEntry::archiveBytes).sum();
+        return (label.isEmpty() ? "" : label + " · ") + ofDay.size() + "개 · "
+                + span + " · " + FileUtil.humanBytes(bytes);
     }
 
     /** 명령 본문을 감싸 예외가 서버 콘솔로 새어 나가지 않게 한다. */
@@ -402,7 +544,7 @@ public final class WorldBackUpCommand {
                 + "<dark_gray>|</dark_gray> <gray>" + age + " 전</gray>" + tags + memo;
     }
 
-    private String dayLabel(LocalDate day) {
+    private static String dayLabel(LocalDate day) {
         LocalDate today = LocalDate.now(ZoneId.systemDefault());
         if (day.equals(today)) return " (오늘)";
         if (day.equals(today.minusDays(1))) return " (어제)";
@@ -807,14 +949,5 @@ public final class WorldBackUpCommand {
                 + "</white> → 그 이전 가장 최근 백업 <white>" + entry.displayTime()
                 + "</white> <dark_gray>(" + gap + " 더 과거)</dark_gray></gray>");
         return found;
-    }
-
-    private List<String> backupIds() {
-        long now = System.currentTimeMillis();
-        if (now - cachedAt > 5_000L) {
-            cachedIds = plugin.repository().list().stream().map(BackupEntry::id).toList();
-            cachedAt = now;
-        }
-        return cachedIds;
     }
 }
