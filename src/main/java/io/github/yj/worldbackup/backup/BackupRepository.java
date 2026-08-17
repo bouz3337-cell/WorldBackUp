@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Predicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
@@ -509,13 +510,10 @@ public class BackupRepository {
         // 아래 선택 과정은 "이미 지우기로 했나" 를 수없이 되묻는다. 선형 탐색하는 List 대신
         // 순서를 지키는 Set 을 쓴다. 기준-차등 관계도 매번 전체를 훑는 대신 한 번만 모아 둔다.
         Set<BackupEntry> toDelete = new LinkedHashSet<>();
-        Map<String, List<BackupEntry>> dependentsByBase = new HashMap<>();
+        Map<String, List<BackupEntry>> dependentsByBase = dependentsByBase(all);
         Map<String, BackupEntry> byId = new HashMap<>();
         for (BackupEntry entry : all) {
             byId.put(entry.id(), entry);
-            if (entry.isDifferential()) {
-                dependentsByBase.computeIfAbsent(entry.baseId(), key -> new ArrayList<>()).add(entry);
-            }
         }
 
         if (tiered) {
@@ -556,7 +554,7 @@ public class BackupRepository {
         // 통째로 복원 불가능해지기 때문이다. 딸린 차등 백업이 모두 정리된 뒤에 함께 사라진다.
         Set<BackupEntry> heldBack = new LinkedHashSet<>();
         toDelete.removeIf(entry -> {
-            if (blockingDependent(entry, dependentsByBase, toDelete) == null) return false;
+            if (blockingDependent(entry, dependentsByBase, toDelete::contains) == null) return false;
             heldBack.add(entry);
             return true;
         });
@@ -573,7 +571,7 @@ public class BackupRepository {
                 for (int i = deletable.size() - 1; i >= 0 && remaining > settings.maxBackups(); i--) {
                     BackupEntry entry = deletable.get(i);
                     if (toDelete.contains(entry)) continue;
-                    if (blockingDependent(entry, dependentsByBase, toDelete) != null) {
+                    if (blockingDependent(entry, dependentsByBase, toDelete::contains) != null) {
                         heldBack.add(entry);
                         continue;
                     }
@@ -590,7 +588,7 @@ public class BackupRepository {
         // 최종 결과가 정해진 뒤에 한 번만 알린다. (위 루프는 같은 항목을 여러 번 검사한다)
         for (BackupEntry base : heldBack) {
             if (toDelete.contains(base)) continue;
-            String holder = blockingDependent(base, dependentsByBase, toDelete);
+            String holder = blockingDependent(base, dependentsByBase, toDelete::contains);
             if (holder != null) {
                 log.info("[백업] 차등 백업 " + holder + " 의 기준이라 " + base.id() + " 는 남겨 둡니다.");
             }
@@ -723,7 +721,7 @@ public class BackupRepository {
             for (int i = survivors.size() - 1; i >= 0 && total > settings.maxTotalBytes(); i--) {
                 BackupEntry entry = survivors.get(i); // 오래된 것부터
                 if (toDelete.contains(entry) || mustKeep.contains(entry)) continue;
-                if (blockingDependent(entry, dependentsByBase, toDelete) != null) continue;
+                if (blockingDependent(entry, dependentsByBase, toDelete::contains) != null) continue;
 
                 toDelete.add(entry);
                 total -= entry.archiveBytes();
@@ -744,36 +742,40 @@ public class BackupRepository {
         }
     }
 
+    /** 기준 id → 그 기준을 삼는 차등 백업들. 매번 전체를 훑지 않도록 한 번만 모아 둔다. */
+    private static Map<String, List<BackupEntry>> dependentsByBase(List<BackupEntry> all) {
+        Map<String, List<BackupEntry>> byBase = new HashMap<>();
+        for (BackupEntry entry : all) {
+            if (entry.isDifferential()) {
+                byBase.computeIfAbsent(entry.baseId(), key -> new ArrayList<>()).add(entry);
+            }
+        }
+        return byBase;
+    }
+
     /**
      * 이번에 함께 지워지지 않는 차등 백업이 딸려 있으면 기준 백업을 남겨야 한다.
+     *
+     * <p>이 판단은 {@link #prune(BackupSettings)} 과 {@link #freeUpSpace} 양쪽에서 쓰이는데,
+     * 한때는 두 곳이 <b>각자 구현</b>을 갖고 있었다. 지금은 답이 같지만 이 코드가 지키려는 것이
+     * "기준이 사라져 차등본이 통째로 복원 불가가 되는 것" 이므로, 한쪽만 고쳐진 채 갈라지면
+     * 대가가 크다. 지우려는 후보를 어떻게 담아 두는지만 호출자마다 다르므로 그것만 받는다.</p>
      *
      * <p>선택 과정에서 여러 번 불리므로 <b>로그를 남기지 않는다.</b> 안내는 결과가 확정된 뒤
      * {@link #prune(BackupSettings)} 에서 한 번만 출력한다.</p>
      *
+     * @param removed 이번 회차에 이미 지우기로 정해진 백업인지 답해 준다. 훑기 시작할 때의
+     *                목록만 보면 그 판단을 못 해서 기준이 영원히 남는다.
      * @return 이 기준 백업을 붙잡고 있는 차등 백업의 id, 없으면 null
      */
-    private String blockingDependent(BackupEntry entry,
-                                     Map<String, List<BackupEntry>> dependentsByBase,
-                                     Set<BackupEntry> toDelete) {
-        if (entry.isDifferential()) return null;
+    private static String blockingDependent(BackupEntry entry,
+                                            Map<String, List<BackupEntry>> dependentsByBase,
+                                            Predicate<BackupEntry> removed) {
+        if (entry.isDifferential()) return null; // 차등본은 기준이 될 수 없다
         for (BackupEntry other : dependentsByBase.getOrDefault(entry.id(), List.of())) {
-            if (!toDelete.contains(other)) return other.id();
+            if (!removed.test(other)) return other.id();
         }
         return null;
-    }
-
-    /**
-     * 아직 지우지 않은 차등 백업이 이 기준을 붙잡고 있는지.
-     *
-     * <p>{@code all} 은 훑기 시작할 때의 목록이라, 이번 회차에 이미 지운 것을 빼고 봐야 한다.
-     * {@link #dependents} 를 쓰면 그 판단을 못 해서 기준이 영원히 남는다.</p>
-     */
-    private static boolean hasSurvivingDependent(List<BackupEntry> all, BackupEntry base, Set<String> deleted) {
-        if (base.isDifferential()) return false; // 차등본은 기준이 될 수 없다
-        for (BackupEntry other : all) {
-            if (base.id().equals(other.baseId()) && !deleted.contains(other.id())) return true;
-        }
-        return false;
     }
 
     /**
@@ -802,6 +804,7 @@ public class BackupRepository {
         int floor = Math.max(1, settings.minBackups());
 
         Set<String> deleted = new HashSet<>();
+        Map<String, List<BackupEntry>> dependentsByBase = dependentsByBase(all);
         long freed = 0L;
 
         // 한 번만 훑으면 상한을 크게 못 맞춘다. 기준 백업은 대개 딸린 차등본보다 오래되어
@@ -816,7 +819,10 @@ public class BackupRepository {
                 if (deleted.contains(entry.id())) continue;
                 if (isPinned(entry)) continue; // 진행 중인 차등 백업의 기준
                 if (entry.protectedFrom(settings.protectManual())) continue;
-                if (hasSurvivingDependent(all, entry, deleted)) continue;
+                // 이번 회차에 이미 지운 것을 빼고 본다. prune 과 같은 판단을 쓴다.
+                if (blockingDependent(entry, dependentsByBase, other -> deleted.contains(other.id())) != null) {
+                    continue;
+                }
                 // 손상된 백업은 하한선에 세지 않으므로 이 뒤로도 계속 지울 수 있다. break 가 아니다.
                 if (entry.complete() && surviving <= floor) continue;
                 // 다만 마지막 하나는 손상 여부와 무관하게 남긴다. "손상" 판정에는 "사이드카와 zip
