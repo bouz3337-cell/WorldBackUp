@@ -98,11 +98,22 @@ public record BackupEntry(
 
     /**
      * 보관 정책에서 자동 삭제를 막아야 하는지.
-     * 손상된 백업은 보호하지 않는다 - 남겨 둘 가치가 없다.
+     *
+     * <p>{@code /wb lock} 으로 <b>직접 잠근 것</b>은 손상 여부와 무관하게 보호한다. 문서가
+     * "어떤 정책으로도 지워지지 않습니다" 라고 약속하기 때문이고, 무엇보다 "손상" 판정에는
+     * <b>메타데이터를 읽지 못했다</b> 가 포함되는데 그것은 일시적일 수 있다(네트워크 저장소,
+     * 백업 폴더를 밖에서 동기화하는 중). 관리자가 영구 보관하려고 잠근 것을 그 판정 하나로
+     * 풀어 버리면 정작 남겨 두려던 백업이 사라진다. 잠금 마커는 사이드카와 <b>별개 파일</b>이라
+     * 메타데이터를 못 읽는 상황에서도 그대로 읽히므로, 그 의사만은 확실히 알 수 있다.</p>
+     *
+     * <p>잠기지 않은 손상 백업은 보호하지 않는다 - 남겨 둘 가치가 없고, 치울 방법이 없으면
+     * 쌓인다. 새로 잠그는 것은 명령 단계에서 거부하므로({@code CommandGuards.lock}) 손상된
+     * 백업이 이 길로 새로 보호되는 일도 없다.</p>
      */
     public boolean protectedFrom(boolean protectManual) {
+        if (locked) return true;
         if (!complete) return false;
-        return locked || (protectManual && type.manualLike());
+        return protectManual && type.manualLike();
     }
 
     /** {@code /wb lock} 으로 관리자가 직접 잠근 백업인지. 개수 상한에서도 제외된다. */

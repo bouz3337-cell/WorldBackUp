@@ -654,6 +654,37 @@ class BackupRetentionTest {
     }
 
     /**
+     * 잠근 백업은 <b>손상으로 보여도</b> 보호를 잃지 않는다.
+     *
+     * <p>README 는 "{@code /wb lock} 으로 잠근 백업은 어떤 정책으로도 지워지지 않습니다" 라고
+     * 약속한다. 그런데 보호 판정이 손상된 백업을 먼저 걸러 내고 있어서, 잠근 백업이 나중에
+     * 손상으로 잡히면 조용히 보호를 잃고 정책에 지워졌다.</p>
+     *
+     * <p>"손상" 에는 <b>메타데이터를 읽지 못했다</b> 가 포함되고 그것은 일시적일 수 있다(네트워크
+     * 저장소, 외부 동기화 중). 관리자가 영구 보관하려고 직접 잠근 것을 그 판정 하나로 풀어
+     * 버리면, 정작 남겨 두려던 그 백업이 사라진다. 잠금 마커는 사이드카와 별개 파일이라
+     * 메타데이터를 못 읽는 상황에서도 그대로 읽히므로, 그 의사는 확실히 알 수 있다.</p>
+     */
+    @Test
+    void aLockedBackupKeepsItsProtectionEvenWhenItLooksBroken() throws Exception {
+        BackupRepository repo = repository();
+        put(repo, "healthy", at(1, 12), BackupType.SCHEDULED, null);
+
+        // 사이드카도 zip 메타도 읽을 수 없지만 잠금 마커는 남아 있다.
+        String id = "20260801-030000";
+        Files.write(repo.directory().resolve(BackupEntry.archiveName(id)), new byte[ONE_MB]);
+        Files.writeString(repo.directory().resolve(BackupEntry.lockName(id)), id, StandardCharsets.UTF_8);
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-age-days", 1);
+            cfg.set("retention.min-backups", 0);
+        }));
+
+        assertTrue(ids(repo).contains(id),
+                "/wb lock 은 어떤 정책보다 우선한다고 문서가 약속한다: " + ids(repo));
+    }
+
+    /**
      * 보관 정리도 <b>전부 손상으로 보인다는 이유로</b> 폴더를 비우지 않는다.
      *
      * <p>"손상" 판정에는 "사이드카와 zip 메타를 둘 다 못 읽었다" 가 포함된다. 정말 깨진 백업일
