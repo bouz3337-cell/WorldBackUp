@@ -93,6 +93,7 @@ class BackupRestoreRoundTripTest {
                 "tester",
                 System.currentTimeMillis(),
                 true,
+                3,
                 true,
                 concat(List.of("**/session.lock"), reloaded.excludes()),
                 reloaded.roots()
@@ -151,7 +152,7 @@ class BackupRestoreRoundTripTest {
 
         // 존재하지 않는 아카이브 -> 복원 실패
         new PendingRestore("missing", tmp.resolve("nowhere.zip"), null, "tester",
-                System.currentTimeMillis(), false, true, List.of(), List.of("world")).write(dataFolder);
+                System.currentTimeMillis(), false, 3, true, List.of(), List.of("world")).write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
         List<Path> markers = RestoreApplier.failureMarkers(dataFolder);
@@ -182,7 +183,7 @@ class BackupRestoreRoundTripTest {
 
         write(world.resolve("level.dat"), "GRIEFED");
         new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
-                false, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
+                false, 3, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
                 .write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
@@ -210,7 +211,7 @@ class BackupRestoreRoundTripTest {
         }
 
         new PendingRestore("evil", archive, null, "tester", System.currentTimeMillis(),
-                false, true, List.of(), List.of("world")).write(dataFolder);
+                false, 3, true, List.of(), List.of("world")).write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
         assertEquals("ok", read(serverRoot.resolve("world/ok.dat")));
@@ -239,7 +240,7 @@ class BackupRestoreRoundTripTest {
         Files.write(archive, java.util.Arrays.copyOf(full, full.length / 2));
 
         new PendingRestore("truncated", archive, null, "tester", System.currentTimeMillis(),
-                true, true, List.of(), List.of("world")).write(dataFolder);
+                true, 3, true, List.of(), List.of("world")).write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
         assertEquals("SOULBOUND-TERRAIN", read(world.resolve("region/r.0.0.mca")),
@@ -269,7 +270,7 @@ class BackupRestoreRoundTripTest {
         }
 
         new PendingRestore("mismatch", archive, null, "tester", System.currentTimeMillis(),
-                true, true, List.of(), List.of("world")).write(dataFolder);
+                true, 3, true, List.of(), List.of("world")).write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
         assertEquals("LEVEL", read(world.resolve("level.dat")), "월드가 그대로 남아야 한다");
@@ -304,7 +305,7 @@ class BackupRestoreRoundTripTest {
         write(world.resolve("level.dat"), "GRIEFED");
 
         new PendingRestore("partial", archive, null, "tester", System.currentTimeMillis(),
-                false, true, List.of(), List.of("world", "config")).write(dataFolder);
+                false, 3, true, List.of(), List.of("world", "config")).write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
         assertEquals("LEVEL-BACKED-UP", read(world.resolve("level.dat")), "데이터가 있는 경로는 복원되어야 한다");
@@ -364,7 +365,7 @@ class BackupRestoreRoundTripTest {
 
         // ---------- 차등 백업으로 복원 ----------
         new PendingRestore(diff.id(), diff.archive(), full.archive(), "tester",
-                System.currentTimeMillis(), true, true,
+                System.currentTimeMillis(), true, 3, true,
                 concat(List.of("**/session.lock"), diff.excludes()), diff.roots()).write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
@@ -407,7 +408,7 @@ class BackupRestoreRoundTripTest {
         FileUtil.deleteRecursively(world);
 
         new PendingRestore(diff.id(), diff.archive(), full.archive(), "tester",
-                System.currentTimeMillis(), false, true,
+                System.currentTimeMillis(), false, 3, true,
                 concat(List.of("**/session.lock"), diff.excludes()), diff.roots()).write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
@@ -447,7 +448,7 @@ class BackupRestoreRoundTripTest {
         FileUtil.deleteRecursively(world);
 
         new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
-                false, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
+                false, 3, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
                 .write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
@@ -484,7 +485,7 @@ class BackupRestoreRoundTripTest {
         write(world.resolve("cache/blob.bin"), "CACHE");                // 안이 전부 보존 대상
 
         new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
-                false, true,
+                false, 3, true,
                 concat(List.of("**/logs/**", "**/cache/**"), entry.excludes()), entry.roots())
                 .write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
@@ -540,7 +541,7 @@ class BackupRestoreRoundTripTest {
         FileUtil.deleteRecursively(world);
 
         new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
-                false, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
+                false, 3, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
                 .write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
@@ -591,7 +592,7 @@ class BackupRestoreRoundTripTest {
         FileUtil.deleteRecursively(world);
 
         new PendingRestore(diff.id(), diff.archive(), full.archive(), "tester", System.currentTimeMillis(),
-                false, true, concat(List.of("**/session.lock"), diff.excludes()), diff.roots())
+                false, 3, true, concat(List.of("**/session.lock"), diff.excludes()), diff.roots())
                 .write(dataFolder);
         RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
 
@@ -606,6 +607,89 @@ class BackupRestoreRoundTripTest {
         byte[] bytes = new byte[length];
         java.util.Arrays.fill(bytes, value);
         return bytes;
+    }
+
+    /**
+     * 복원 전 공간 점검의 경계.
+     *
+     * <p>이 판단이 <b>잘못 거짓을 내면</b> 되돌릴 수 있었던 복원을 막는다. 반쯤 복원된 월드도
+     * 나쁘지만 "되돌릴 방법이 아예 없다" 는 더 나쁠 수 있어서, 여유분은 작게 잡고 확실히
+     * 모자랄 때만 막는다.</p>
+     */
+    @Test
+    void theRestoreSpaceCheckOnlyBlocksWhenItIsCertainlyShort() {
+        long gb = 1024L * 1024 * 1024;
+        long headroom = 64L * 1024 * 1024;
+
+        assertTrue(RestoreApplier.hasRoomToRestore(10 * gb, 20 * gb), "넉넉하면 통과");
+        assertTrue(RestoreApplier.hasRoomToRestore(10 * gb, 10 * gb + headroom), "딱 맞아도 통과");
+        assertFalse(RestoreApplier.hasRoomToRestore(10 * gb, 10 * gb), "여유분을 못 채우면 막는다");
+        assertFalse(RestoreApplier.hasRoomToRestore(10 * gb, 5 * gb));
+
+        assertTrue(RestoreApplier.hasRoomToRestore(0L, 0L), "쓸 것이 없으면 막을 이유가 없다");
+        assertTrue(RestoreApplier.hasRoomToRestore(-1L, 0L), "크기를 모르면 막지 않는다");
+        assertTrue(RestoreApplier.hasRoomToRestore(Long.MAX_VALUE, 1L), "넘치면 막을 근거가 없다");
+    }
+
+    /**
+     * 공간이 넉넉한 평소에는 이 점검이 복원을 막지 않는다.
+     *
+     * <p>점검을 넣다가 정상 복원을 깨뜨리는 것이 가장 흔한 실수다. 실제 복원 왕복으로 확인한다.</p>
+     */
+    @Test
+    void theSpaceCheckDoesNotGetInTheWayOfANormalRestore() throws Exception {
+        Path serverRoot = tmp.resolve("server15");
+        Path world = serverRoot.resolve("world");
+        Path dataFolder = serverRoot.resolve("plugins/WorldBackUp");
+        Path backupDir = dataFolder.resolve("backups");
+
+        write(world.resolve("level.dat"), "LEVEL");
+        write(world.resolve("region/r.0.0.mca"), "REGION");
+        write(serverRoot.resolve("server.properties"), "motd=hello");
+
+        BackupRepository repository = new BackupRepository(backupDir, LOG);
+        repository.ensureDirectory();
+        BackupEntry entry = createBackup(repository, serverRoot, world, backupDir);
+
+        FileUtil.deleteRecursively(world);
+        new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
+                true, 3, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
+                .write(dataFolder);
+        RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
+
+        assertEquals("REGION", read(world.resolve("region/r.0.0.mca")), "평소 복원은 그대로 된다");
+        assertEquals("LEVEL", read(world.resolve("level.dat")));
+    }
+
+    /**
+     * 옛 버전이 남긴 복원 예약 파일도 읽을 수 있어야 한다.
+     *
+     * <p>예약 파일은 <b>서버 재시작을 건너 살아남는</b> 유일한 지시다. 플러그인을 올리는
+     * 도중에 이미 예약이 걸려 있을 수 있는데, 새 키를 못 읽어 예약이 무시되면 관리자는
+     * 복원이 됐다고 믿고 서버를 열게 된다.</p>
+     */
+    @Test
+    void aPendingFileFromAnOlderVersionIsStillUnderstood() throws Exception {
+        Path dataFolder = tmp.resolve("server16/plugins/WorldBackUp");
+        Files.createDirectories(dataFolder);
+        // keep-replaced-max 키가 없던 시절의 예약 파일
+        write(dataFolder.resolve(PendingRestore.FILE_NAME), String.join("\n",
+                "id: 20260101-000000",
+                "archive: " + tmp.resolve("server16/backups/wb-20260101-000000.zip"),
+                "requested-by: admin",
+                "requested-at: 1",
+                "keep-replaced: true",
+                "verify-archive: false",
+                "preserve: []",
+                "roots:",
+                "- world"));
+
+        PendingRestore pending = PendingRestore.read(PendingRestore.file(dataFolder)).orElseThrow();
+
+        assertEquals("20260101-000000", pending.id());
+        assertTrue(pending.keepReplaced());
+        assertEquals(3, pending.keepReplacedMax(), "적혀 있지 않으면 기본값으로 본다");
+        assertEquals(List.of("world"), pending.roots());
     }
 
     /** 매니페스트를 한 줄씩 흘려 읽도록 바꿨으므로, 왕복이 정확한지 확인한다. */

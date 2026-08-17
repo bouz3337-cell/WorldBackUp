@@ -16,7 +16,9 @@ import java.util.Optional;
  * 서버 실행 중에는 월드 파일이 잠겨 있으므로, 예약 → 재시작 → 월드 로드 전 적용 순서로 동작한다.
  */
 /**
- * @param baseArchive 차등 백업이면 기준이 되는 전체 백업의 경로, 전체 백업이면 null.
+ * @param baseArchive     차등 백업이면 기준이 되는 전체 백업의 경로, 전체 백업이면 null.
+ * @param keepReplacedMax {@code replaced/} 스냅샷을 몇 개까지 남길지. 공간이 모자랄 때
+ *                        옛 스냅샷을 정리해 자리를 만드는 데 쓴다. (0 = 정리하지 않음)
  */
 public record PendingRestore(
         String id,
@@ -25,6 +27,7 @@ public record PendingRestore(
         String requestedBy,
         long requestedAt,
         boolean keepReplaced,
+        int keepReplacedMax,
         boolean verifyArchive,
         List<String> preserve,
         List<String> roots
@@ -55,6 +58,7 @@ public record PendingRestore(
         yaml.set("requested-by", requestedBy);
         yaml.set("requested-at", requestedAt);
         yaml.set("keep-replaced", keepReplaced);
+        yaml.set("keep-replaced-max", keepReplacedMax);
         yaml.set("verify-archive", verifyArchive);
         yaml.set("preserve", new ArrayList<>(preserve));
         yaml.set("roots", new ArrayList<>(roots));
@@ -75,6 +79,8 @@ public record PendingRestore(
                 yaml.getString("requested-by", "unknown"),
                 yaml.getLong("requested-at", 0L),
                 yaml.getBoolean("keep-replaced", true),
+                // 이 값을 적지 않던 버전이 남긴 예약 파일이면 기본값으로 본다.
+                yaml.getInt("keep-replaced-max", 3),
                 yaml.getBoolean("verify-archive", true),
                 List.copyOf(yaml.getStringList("preserve")),
                 List.copyOf(yaml.getStringList("roots"))

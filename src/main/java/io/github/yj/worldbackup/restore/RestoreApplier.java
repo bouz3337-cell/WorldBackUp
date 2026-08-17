@@ -166,6 +166,11 @@ public final class RestoreApplier {
                 verify(pending.archive(), pending.baseArchive(), manifest, log);
             }
 
+            // 공간도 지우기 전에 본다. 복원은 "비우고 푸는" 순서라, 중간에 공간이 떨어지면
+            // 반쯤 복원된 월드가 남는다. 백업에는 min-free-disk-gb 브레이크가 있는데 정작
+            // 위험이 큰 복원에는 없었다.
+            ensureRoomToRestore(dataFolder, serverRoot, pending, manifest, roots, preserve, log);
+
             Path replacedDir = null;
             if (pending.keepReplaced()) {
                 replacedDir = dataFolder.resolve("replaced").resolve(STAMP.format(Instant.now()));
@@ -375,6 +380,123 @@ public final class RestoreApplier {
                     + " (이 백업으로는 해당 경로를 복원할 수 없습니다)");
         }
         return covered;
+    }
+
+    /**
+     * 복원이 도중에 공간 부족으로 끊기지 않을지 <b>지우기 전에</b> 확인한다.
+     *
+     * <p>복원은 "기존 데이터 비우기 → 압축 해제" 순서다. 푸는 도중에 디스크가 차면 반쯤
+     * 복원된 월드와 실패 표식만 남는다. 백업 쪽에는 {@code min-free-disk-gb} 브레이크가 있는데
+     * 정작 위험이 큰 이쪽에는 없었다.</p>
+     *
+     * <p>{@code keep-replaced-files} 가 켜져 있으면(기본값) 기존 파일을 지우지 않고
+     * {@code replaced/} 로 <b>옮긴다.</b> 같은 파일시스템 안의 이동은 이름만 바뀌므로 공간이
+     * 하나도 돌아오지 않는다 - 즉 푸는 만큼이 그대로 더 필요하다. 이 경우에만 막는다.</p>
+     *
+     * <p>꺼져 있으면 기존 데이터를 <b>지우면서</b> 그만큼 공간이 돌아오므로, 지금 여유가
+     * 적어도 복원이 성공할 수 있다. 그런 복원을 막으면 되돌릴 방법을 없애는 셈이라 경고만
+     * 한다 - 여기서 걸러 내려는 것은 "거의 확실히 도중에 끊길" 상황뿐이다.</p>
+     *
+     * @throws IOException 공간이 모자라 시작하지 않는 편이 나을 때
+     */
+    private static void ensureRoomToRestore(Path dataFolder,
+                                            Path serverRoot,
+                                            PendingRestore pending,
+                                            Manifest manifest,
+                                            List<String> roots,
+                                            GlobMatcher preserve,
+                                            Logger log) throws IOException {
+        long needed = restoredBytes(pending.archive(), manifest, roots, preserve);
+        if (needed <= 0) return;
+
+        long free = FileUtil.usableSpace(serverRoot);
+        log.info("[WorldBackUp] 복원에 쓰이는 공간 " + FileUtil.humanBytes(needed)
+                + " · 남은 공간 " + FileUtil.humanBytes(free));
+
+        if (hasRoomToRestore(needed, free)) return;
+
+        // 자리가 모자라면 <b>플러그인 자기 잔재부터</b> 치운다. replaced/ 에는 이전 복원이
+        // 밀어낸 옛 월드가 몇 벌씩 들어 있어서, 정작 되돌려야 하는 순간에 그것이 길을 막는
+        // 일이 생긴다. 지우는 기준은 평소와 똑같은 keep-replaced-max 이므로 보관 정책이
+        // 달라지지는 않는다 - 정리 시점만 복원 뒤에서 복원 앞으로 옮기는 것이다.
+        log.warning("[WorldBackUp] 공간이 모자랍니다. 오래된 replaced/ 스냅샷부터 정리합니다.");
+        cleanupReplaced(dataFolder, pending.keepReplacedMax(), log);
+        free = FileUtil.usableSpace(serverRoot);
+        if (hasRoomToRestore(needed, free)) {
+            log.info("[WorldBackUp] 정리 후 남은 공간 " + FileUtil.humanBytes(free) + " - 복원을 계속합니다.");
+            return;
+        }
+
+        if (!pending.keepReplaced()) {
+            // 지우면서 공간이 돌아오므로 성공할 수도 있다. 막지 않는다.
+            log.warning("[WorldBackUp] 남은 공간이 복원할 양보다 적습니다. 기존 데이터를 지우며"
+                    + " 확보되는 공간에 기대야 합니다. 도중에 끊기면 replaced/ 사본이 없다는 점을"
+                    + " 유념하세요. (restore.keep-replaced-files 가 꺼져 있습니다)");
+            return;
+        }
+
+        throw new IOException("디스크 여유 공간이 부족해 복원을 시작하지 않았습니다. 필요: "
+                + FileUtil.humanBytes(needed + RESTORE_HEADROOM_BYTES)
+                + ", 남음: " + FileUtil.humanBytes(free)
+                + " - 월드는 건드리지 않았습니다. plugins/WorldBackUp/replaced/ 를 비우거나"
+                + " restore.keep-replaced-files 를 끄면 필요한 양이 줄어듭니다.");
+    }
+
+    /**
+     * 푸는 동안 공간이 떨어지지 않을 여유가 있는지. 디스크를 만지지 않으므로 경계를 그대로
+     * 검증할 수 있다.
+     *
+     * <p>{@code public} 인 이유는 하나뿐이다 - 이 규칙이 <b>잘못 거짓을 내면</b> 되돌릴 수
+     * 있었던 복원을 막아 버리므로, 경계를 테스트로 못 박아 두어야 한다. 되돌릴 방법을 없애는
+     * 것은 반쯤 복원된 월드보다 나쁠 수 있다.</p>
+     */
+    public static boolean hasRoomToRestore(long neededBytes, long freeBytes) {
+        if (neededBytes <= 0) return true;
+        long required = neededBytes + RESTORE_HEADROOM_BYTES;
+        if (required < 0) return true; // 넘쳤다 - 막을 근거가 없다
+        return freeBytes >= required;
+    }
+
+    /**
+     * 여유가 이만큼은 더 남아야 시작한다.
+     *
+     * <p>복원 보고서·로그·서버 자신이 쓰는 몫이다. 크게 잡으면 정작 되돌려야 할 때 막히므로
+     * 작게 둔다 - 여기서 걸러 내려는 것은 "거의 확실히 도중에 끊길" 상황뿐이다.</p>
+     */
+    private static final long RESTORE_HEADROOM_BYTES = 64L * 1024 * 1024;
+
+    /**
+     * 이번 복원이 디스크에 쓰게 될 바이트.
+     *
+     * <p>매니페스트가 있으면 그것이 정답이다 - 담아낸 파일의 <b>압축 해제된</b> 크기가 적혀
+     * 있어서 실제로 쓰이는 양과 같고, 기준 백업에서 꺼내 올 파일까지 함께 센다. 매니페스트가
+     * 없는 옛 백업이면 zip 의 중앙 디렉터리에 적힌 크기를 쓴다(역시 읽는 비용이 거의 없다).</p>
+     */
+    private static long restoredBytes(Path archive,
+                                      Manifest manifest,
+                                      List<String> roots,
+                                      GlobMatcher preserve) throws IOException {
+        long total = 0L;
+        if (manifest != null) {
+            for (String name : manifest.storedPaths()) {
+                if (!roots.isEmpty() && !underRoots(name, roots)) continue;
+                if (preserve.matchesFile(name)) continue;
+                total += manifest.storedSize(name);
+            }
+            return total;
+        }
+        try (ZipFile zip = new ZipFile(archive.toFile(), StandardCharsets.UTF_8)) {
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                String name = entry.getName();
+                if (entry.isDirectory() || isMetadata(name)) continue;
+                if (!roots.isEmpty() && !underRoots(name, roots)) continue;
+                if (preserve.matchesFile(name)) continue;
+                total += Math.max(0L, entry.getSize());
+            }
+        }
+        return total;
     }
 
     /**

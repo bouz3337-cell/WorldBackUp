@@ -89,6 +89,16 @@ public final class Manifest {
         return stamp != null && stamp.size() != NOT_STORED;
     }
 
+    /**
+     * 되돌렸을 때 디스크에 쓰이는 크기. 목록에 없거나 담지 못한 파일이면 0.
+     *
+     * <p>복원에 필요한 공간을 미리 재는 데 쓴다. 압축 해제된 크기라 실제로 쓰이는 양과 같다.</p>
+     */
+    public long storedSize(String path) {
+        Stamp stamp = files.get(path);
+        return stamp == null || stamp.size() == NOT_STORED ? 0L : stamp.size();
+    }
+
     public void put(String path, long size, long modified) {
         files.put(path, new Stamp(size, modified));
     }

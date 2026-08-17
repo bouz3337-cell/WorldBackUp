@@ -82,6 +82,11 @@ public final class RestoreService {
         }
         Msg.sendRaw(sender, " <gray>대상     :</gray> <white>"
                 + (roots.isEmpty() ? "(메타데이터 없음 - 덮어쓰기만)" : String.join(", ", roots)) + "</white>");
+        // 공간이 모자라면 복원이 반쯤 진행된 채로 끊긴다. 확정하기 <b>전에</b> 알려 준다.
+        if (!reportDiskSpace(sender, entry)) {
+            confirmation = null; // /wb confirm 으로 밀고 나갈 수 없게 요청을 지운다
+            return;
+        }
         // 인벤토리가 안 들어 있는 백업이면 여기서 알려야 한다. 되돌린 뒤에 알면 늦는다.
         if (!entry.hasPlayerData()) {
             Msg.sendRaw(sender, "");
@@ -104,6 +109,50 @@ public final class RestoreService {
         Msg.sendRaw(sender, " <yellow>계속하려면 <click:suggest_command:'/wb confirm'><white><bold>/wb confirm</bold></white></click> "
                 + "<gray>(" + settings.confirmTimeoutSeconds() + "초 안에)</gray></yellow>");
         Msg.sendRaw(sender, "<dark_red><bold>──────────────────────────────────────</bold></dark_red>");
+    }
+
+    /**
+     * 복원에 필요한 공간과 남은 공간을 확인 화면에 적는다.
+     *
+     * <p>복원은 "비우고 푸는" 순서라 도중에 공간이 떨어지면 반쯤 복원된 월드가 남는다.
+     * {@code onLoad} 단계에도 같은 점검이 있지만 그때는 서버를 이미 껐다 켠 뒤다 - 확정하기
+     * 전에 여기서 알려 주는 편이 훨씬 낫다.</p>
+     *
+     * <p>필요한 양은 이 백업의 스냅샷 크기로 어림잡는다. {@code worlds} 만 되돌릴 때는 실제보다
+     * 크게 잡히는데, 그 방향이 안전하다. 정확한 값은 매니페스트를 읽어야 알 수 있고 그것은
+     * 명령 처리 중에 하기엔 무거운 일이다.</p>
+     *
+     * @return 계속 진행해도 되면 true
+     */
+    private boolean reportDiskSpace(CommandSender sender, BackupEntry entry) {
+        long needed = entry.originalBytes();
+        long free = FileUtil.usableSpace(plugin.settings().serverRoot());
+        if (needed <= 0) return true; // 크기 기록이 없는 옛 백업 - onLoad 점검에 맡긴다
+
+        String line = " <gray>공간     :</gray> <white>" + FileUtil.humanBytes(needed)
+                + "</white> <dark_gray>필요 · " + FileUtil.humanBytes(free) + " 남음</dark_gray>";
+
+        if (free < needed) {
+            Msg.sendRaw(sender, line);
+            Msg.sendRaw(sender, "");
+            Msg.send(sender, "<red><bold>디스크 여유 공간이 부족해 복원을 시작할 수 없습니다.</bold></red>");
+            Msg.send(sender, "<gray>복원은 기존 데이터를 비우고 푸는 순서라, 도중에 공간이 떨어지면 "
+                    + "월드가 반쯤 복원된 상태로 남습니다. 그래서 시작하지 않습니다.</gray>");
+            Msg.send(sender, "<gray>공간을 확보한 뒤 다시 시도하세요. "
+                    + "<white>plugins/WorldBackUp/replaced/</white> 에 이전 복원이 밀어낸 월드가 "
+                    + "쌓여 있을 수 있습니다.</gray>");
+            return false;
+        }
+
+        long spare = free - needed;
+        if (spare < plugin.settings().minFreeDiskBytes()) {
+            Msg.sendRaw(sender, line + " <yellow>(빠듯합니다)</yellow>");
+            Msg.sendRaw(sender, " <yellow>복원 뒤 남는 공간이 "
+                    + FileUtil.humanBytes(spare) + " 뿐입니다.</yellow>");
+        } else {
+            Msg.sendRaw(sender, line);
+        }
+        return true;
     }
 
     /** 2단계: 확인. 안전 백업 후 카운트다운을 시작한다. */
@@ -189,6 +238,7 @@ public final class RestoreService {
                 current.requester(),
                 System.currentTimeMillis(),
                 settings.keepReplacedFiles(),
+                settings.keepReplacedMax(),
                 settings.verifyArchive(),
                 preserve,
                 current.roots()
