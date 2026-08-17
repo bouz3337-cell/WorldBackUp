@@ -26,10 +26,12 @@ import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Brigadier 로 등록하는 {@code /worldbackup} 명령어.
@@ -89,6 +91,8 @@ public final class WorldBackUpCommand {
                 .then(backupArgument("info", "worldbackup.use", this::info))
                 .then(Commands.literal("restore")
                         .requires(source -> has(source.getSender(), "worldbackup.restore"))
+                        // 인자 없이 치면 시점 목록을 띄운다. 사고 직후에 ID 를 외우고 있을 리 없다.
+                        .executes(ctx -> run(ctx, this::restoreMenu))
                         // Brigadier 의 word() 는 콜론과 공백을 받지 못한다. "03:00" 이나
                         // "2026-08-16 03:00" 은 인자 파싱 단계에서 거부되므로 별도 통로를 둔다.
                         .then(Commands.literal("at")
@@ -203,6 +207,8 @@ public final class WorldBackUpCommand {
         line(sender, "/wb list [페이지|날짜]", "백업 목록을 봅니다");
         line(sender, "/wb list days", "날짜별로 몇 개씩 있는지 봅니다");
         line(sender, "/wb info [ID|번호]", "백업 상세 정보를 봅니다");
+        line(sender, "/wb restore", "되돌릴 시점을 목록에서 고릅니다");
+        line(sender, "/wb restore", "되돌릴 시점을 목록에서 골라 클릭합니다");
         line(sender, "/wb restore [ID|번호] (worlds)", "그 시점으로 되돌립니다");
         line(sender, "/wb restore at [시각]", "시각으로 찾아 되돌립니다 (03:00, 9h)");
         line(sender, "/wb confirm", "복원을 확정합니다");
@@ -450,6 +456,88 @@ public final class WorldBackUpCommand {
             Msg.sendRaw(sender, " <click:suggest_command:'/wb restore " + entry.id()
                     + "'><green>[이 시점으로 복원하기]</green></click>");
         }
+    }
+
+    /** {@code /wb restore} 메뉴에 띄울 시점들. 사람이 실제로 말하는 단위로 잡는다. */
+    private record Preset(String label, Duration back) {
+    }
+
+    private static final List<Preset> RESTORE_PRESETS = List.of(
+            new Preset("30분 전", Duration.ofMinutes(30)),
+            new Preset("1시간 전", Duration.ofHours(1)),
+            new Preset("3시간 전", Duration.ofHours(3)),
+            new Preset("6시간 전", Duration.ofHours(6)),
+            new Preset("12시간 전", Duration.ofHours(12)),
+            new Preset("1일 전", Duration.ofDays(1)),
+            new Preset("3일 전", Duration.ofDays(3)),
+            new Preset("7일 전", Duration.ofDays(7)),
+            new Preset("14일 전", Duration.ofDays(14)),
+            new Preset("30일 전", Duration.ofDays(30)));
+
+    /**
+     * 인자 없는 {@code /wb restore} - 되돌릴 시점을 클릭으로 고른다.
+     *
+     * <p>사고를 막 발견한 사람에게 백업 ID 를 외우게 할 수는 없다. 각 줄은 그 시점에
+     * <b>실제로 존재하는</b> 백업을 가리키므로, 눌렀을 때 무엇으로 돌아가는지가 화면에 그대로 보인다.
+     * 같은 백업을 여러 줄에 반복해 보여 주지 않는다 - 보관이 성긴 구간에서는 여러 시점이
+     * 같은 백업 하나로 모이는데, 그걸 여러 줄로 늘어놓으면 선택지가 많은 것처럼 착각하게 된다.</p>
+     */
+    private void restoreMenu(CommandSender sender) {
+        List<BackupEntry> entries = plugin.repository().list().stream()
+                .filter(BackupEntry::complete)
+                .toList();
+        if (entries.isEmpty()) {
+            Msg.send(sender, "<red>되돌릴 수 있는 백업이 없습니다.</red>");
+            Msg.send(sender, "<gray><white>/wb list</white> 로 확인하세요. 손상된 백업만 있을 수 있습니다.</gray>");
+            return;
+        }
+
+        Instant now = Instant.now();
+        BackupEntry oldest = entries.get(entries.size() - 1);
+
+        Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>되돌릴 시점 고르기</aqua> <dark_gray>─────</dark_gray>");
+        Msg.sendRaw(sender, "<dark_gray>보관 범위: " + FileUtil.humanDuration(
+                Duration.between(oldest.createdAt(), now)) + " 전까지 (" + oldest.displayTime() + ")</dark_gray>");
+
+        Set<String> shown = new HashSet<>();
+        restoreOption(sender, "가장 최근", entries.get(0), now);
+        shown.add(entries.get(0).id());
+
+        for (Preset preset : RESTORE_PRESETS) {
+            Instant target = now.minus(preset.back());
+            BackupEntry match = null;
+            for (BackupEntry entry : entries) { // 최신순이라 첫 항목이 가장 가까운 과거
+                if (!entry.createdAt().isAfter(target)) {
+                    match = entry;
+                    break;
+                }
+            }
+            if (match == null) break;             // 여기부터는 보관 범위 밖이다
+            if (!shown.add(match.id())) continue; // 앞 줄과 같은 백업
+            restoreOption(sender, preset.label(), match, now);
+        }
+
+        Msg.sendRaw(sender, "<dark_gray>─────────────────────────────</dark_gray>");
+        Msg.sendRaw(sender, "<gray>클릭하면 <white>확인 화면</white>이 뜹니다. "
+                + "실제 복원은 <white>/wb confirm</white> 을 눌러야 시작됩니다.</gray>");
+        Msg.sendRaw(sender, "<dark_gray>정확한 시각을 아시면 <white>/wb restore at 03:00</white> · "
+                + "날짜별로 보려면 <white>/wb list days</white></dark_gray>");
+    }
+
+    /** 메뉴 한 줄. 눌렀을 때 어디로 돌아가는지가 줄에 그대로 적혀 있어야 한다. */
+    private void restoreOption(CommandSender sender, String label, BackupEntry entry, Instant now) {
+        String age = FileUtil.humanDuration(Duration.between(entry.createdAt(), now));
+        String tags = entry.isDifferential() ? " <dark_gray>[차등]</dark_gray>" : "";
+        if (!entry.hasPlayerData()) {
+            tags += entry.playerDataUnknown()
+                    ? " <yellow>[플레이어?]</yellow>" : " <red>[플레이어없음]</red>";
+        }
+        Msg.sendRaw(sender, " <hover:show_text:'<gray>" + entry.displayTime()
+                + " 시점으로 되돌립니다</gray>'><click:run_command:'/wb restore " + entry.id() + "'>"
+                + "<green>[" + label + "]</green></click></hover>"
+                + " <white>" + entry.displayTime() + "</white>"
+                + " <dark_gray>·</dark_gray> <aqua>" + FileUtil.humanBytes(entry.archiveBytes()) + "</aqua>"
+                + " <dark_gray>(" + age + " 전)</dark_gray>" + tags);
     }
 
     private void restore(CommandContext<CommandSourceStack> ctx, CommandSender sender, boolean worldsOnly) {
