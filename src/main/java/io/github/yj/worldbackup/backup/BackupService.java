@@ -227,6 +227,10 @@ public final class BackupService {
             plugin.getLogger().info("[백업] " + type.korean() + " 백업 시작 (" + backupId + ")");
         }
 
+        // 아카이브가 최종 이름을 받았는지. 이게 true 가 된 뒤로는 실패해도 파일을 지우지 않는다.
+        // 압축은 끝났는데 뒷정리에서 예외가 나면, 멀쩡히 만들어진 백업을 스스로 지우게 된다.
+        boolean archived = false;
+
         // 얼리는 작업부터 원복까지 통째로 감싼다. freezeWorlds 가 실패하거나 타임아웃 나더라도
         // finally 는 반드시 실행되고, 원복에 필요한 정보는 frozenWorlds 에 이미 들어 있다.
         try {
@@ -350,6 +354,8 @@ public final class BackupService {
                     },
                     plugin.getLogger()
             );
+            // 여기까지 왔으면 zip 은 정상적으로 닫히고 최종 이름까지 받았다.
+            archived = true;
 
             BackupEntry entry = new BackupEntry(backupId, archivePath, created, type, cleanLabel,
                     result.archiveBytes(), result.originalBytes(), result.fileCount(),
@@ -390,17 +396,19 @@ public final class BackupService {
                 plugin.getLogger().info("[백업] 요청자: " + initiator.getName());
             }
 
-            repo.prune(settings);
+            pruneAfterBackup(settings, repo);
             return entry;
 
         } catch (Throwable t) {
-            // 얼릴 때 내려 둔 변경 플래그를 되돌린다. 이 백업은 아무것도 담지 못했으므로
-            // 그대로 두면 다음 주기까지 "변경 없음"으로 건너뛰어 공백이 길어진다.
-            worldChanged.set(true);
-            // 실패한 zip 조각은 남기지 않는다. (Archiver 가 임시 파일을 지우지만 이중으로 확인한다)
-            try {
-                Files.deleteIfExists(archivePath);
-            } catch (IOException ignored) {
+            if (!archived) {
+                // 얼릴 때 내려 둔 변경 플래그를 되돌린다. 이 백업은 아무것도 담지 못했으므로
+                // 그대로 두면 다음 주기까지 "변경 없음"으로 건너뛰어 공백이 길어진다.
+                worldChanged.set(true);
+                // 실패한 zip 조각은 남기지 않는다. (Archiver 가 임시 파일을 지우지만 이중으로 확인한다)
+                try {
+                    Files.deleteIfExists(archivePath);
+                } catch (IOException ignored) {
+                }
             }
             plugin.getLogger().log(Level.SEVERE, "[백업] 실패: " + t.getMessage(), t);
             if (settings.broadcast()) {
@@ -412,6 +420,43 @@ public final class BackupService {
             repo.unpin();
             thawWorlds();
         }
+    }
+
+    /**
+     * 백업이 성공한 뒤 보관 정책을 적용한다.
+     *
+     * <p>두 가지를 지킨다.</p>
+     * <ul>
+     *   <li>복원 실패 정지 중에는 <b>돌지 않는다.</b> 그 정지가 존재하는 이유가 "반쯤 복원된
+     *       월드가 백업되면서 멀쩡한 예전 백업이 정책에 밀려 사라지는 것" 인데, 관리자가 상황을
+     *       보려고 {@code /wb backup} 을 한 번 치면 바로 그 일이 일어났다. 수동 백업은 계속
+     *       쓸 수 있게 두되, 뒤따르는 정리만 멈춘다.</li>
+     *   <li>여기서 난 예외가 <b>백업 자체를 실패로 만들지 않는다.</b> 압축은 이미 끝났고 파일도
+     *       제자리에 있다. 정리에 실패했다고 성공한 백업을 실패로 보고하면(그리고 예전에는
+     *       그 파일을 지우기까지 했다) 결과가 실제와 어긋난다.</li>
+     * </ul>
+     */
+    private void pruneAfterBackup(BackupSettings settings, BackupRepository repo) {
+        if (plugin.restoreFailureHold()) {
+            plugin.getLogger().warning("[백업] 복원 실패 기록이 있어 이번 백업 뒤 보관 정리는 건너뜁니다. "
+                    + "(월드를 확인한 뒤 표식을 지우고 /wb reload 하세요)");
+            return;
+        }
+        try {
+            repo.prune(settings);
+        } catch (Exception e) {
+            plugin.getLogger().log(Level.WARNING, "[백업] 백업은 끝났지만 보관 정리에 실패했습니다.", e);
+        }
+    }
+
+    /**
+     * 압축 후 크기를 어림잡는 비율. 디스크 여유 판단에만 쓰므로 보수적으로 잡는다.
+     *
+     * <p>레벨 0 은 무압축이라 원본 크기 그대로 쓰인다. 여기에 0.6 을 곱하면 필요한 공간을
+     * 40% 적게 잡아, 정작 공간이 모자란 상황을 통과시켜 놓고 압축 중에 실패하게 된다.</p>
+     */
+    private static double compressionFactor(BackupSettings settings) {
+        return settings.compressionLevel() == 0 ? 1.0 : 0.6;
     }
 
     /**
@@ -519,10 +564,18 @@ public final class BackupService {
 
     /** @param plannedBytes 이번 아카이브에 실제로 저장할 원본 바이트 (차등 백업이면 바뀐 파일만) */
     private void ensureDiskSpace(BackupSettings settings, BackupRepository repo, long plannedBytes) {
-        long estimatedArchive = Math.max(1L, (long) (plannedBytes * 0.6)); // 압축률을 보수적으로 가정
+        long estimatedArchive = Math.max(1L, (long) (plannedBytes * compressionFactor(settings)));
         long required = estimatedArchive + settings.minFreeDiskBytes();
         long free = FileUtil.usableSpace(repo.directory());
         if (free >= required) return;
+
+        // 복원 실패 정지 중에는 공간을 만들겠다고 옛 백업을 지우면 안 된다. 그 백업들이
+        // 반쯤 복원된 월드를 되돌릴 유일한 재료다. 이번 백업을 포기하는 쪽이 훨씬 싸다.
+        if (plugin.restoreFailureHold()) {
+            throw new IllegalStateException("디스크 여유 공간이 부족합니다. 필요: "
+                    + FileUtil.humanBytes(required) + ", 남음: " + FileUtil.humanBytes(free)
+                    + " (복원 실패 기록이 있어 오래된 백업을 지우지 않습니다)");
+        }
 
         plugin.getLogger().warning("[백업] 디스크 여유 공간 부족 (" + FileUtil.humanBytes(free)
                 + " < " + FileUtil.humanBytes(required) + "). 오래된 백업을 정리합니다.");
