@@ -90,9 +90,11 @@ public final class BackupSettings {
         this.backupDir = (configured.isAbsolute() ? configured : dataFolder.resolve(configured))
                 .toAbsolutePath().normalize();
 
-        this.worlds = lower(cfg.getStringList("targets.worlds"));
-        this.serverFiles = cfg.getStringList("targets.server-files");
-        this.extraPaths = cfg.getStringList("targets.extra-paths");
+        // 전부 복사해서 잠근다. "불변 설정 스냅샷" 이 이 클래스의 계약인데, getStringList 가
+        // 돌려주는 리스트를 그대로 들고 있으면 호출자가 백업 대상을 바꿔 버릴 수 있다.
+        this.worlds = List.copyOf(lower(cfg.getStringList("targets.worlds")));
+        this.serverFiles = List.copyOf(cfg.getStringList("targets.server-files"));
+        this.extraPaths = List.copyOf(cfg.getStringList("targets.extra-paths"));
 
         List<String> excludes = new ArrayList<>(cfg.getStringList("targets.exclude"));
         // 플러그인 자기 폴더(backups/, replaced/, 예약 파일 등)와 백업 폴더는 절대 백업하지 않는다.

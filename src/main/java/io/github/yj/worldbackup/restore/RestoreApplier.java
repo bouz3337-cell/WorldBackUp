@@ -283,16 +283,24 @@ public final class RestoreApplier {
         // 차등 백업이면 매니페스트가 그 시점의 정답이고, 전체 백업이면 zip 에 든 파일 그대로다.
         Set<String> files = manifest != null ? manifest.paths() : dataEntryNames(archive);
 
-        List<String> covered = new ArrayList<>();
-        for (String root : roots) {
-            boolean hasData = false;
-            for (String path : files) {
-                if (underRoots(path, List.of(root))) {
-                    hasData = true;
+        // root 마다 전체 파일 목록을 다시 훑으면 (파일 수 × root 수) 가 된다. 50만 파일짜리
+        // 월드에 root 가 열몇 개면 그것만으로 수백만 번이다. 한 번만 훑으면서 어느 root 가
+        // 덮였는지 표시하고, 전부 찾으면 거기서 멈춘다.
+        Set<String> withData = new HashSet<>();
+        for (String path : files) {
+            if (withData.size() == roots.size()) break;
+            for (String root : roots) {
+                if (withData.contains(root)) continue;
+                if (path.equals(root) || path.startsWith(root + "/")) {
+                    withData.add(root);
                     break;
                 }
             }
-            if (hasData) {
+        }
+
+        List<String> covered = new ArrayList<>(); // roots 의 원래 순서를 지킨다
+        for (String root : roots) {
+            if (withData.contains(root)) {
                 covered.add(root);
             } else {
                 log.warning("[WorldBackUp] 백업에 '" + root + "' 데이터가 없어 이 경로는 건드리지 않습니다. "

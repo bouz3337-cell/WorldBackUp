@@ -55,9 +55,14 @@ public final class WorldBackUpCommand {
 
     private final WorldBackUpPlugin plugin;
 
-    /** 탭 완성용 백업 ID 캐시 (5초). 매번 디스크를 읽지 않기 위함. */
-    private List<String> cachedIds = List.of();
-    private long cachedAt;
+    /**
+     * 탭 완성용 백업 ID 캐시 (5초). 매번 디스크를 읽지 않기 위함.
+     *
+     * <p>제안 계산이 메인 스레드에서 돈다는 보장이 없어 {@code volatile} 로 둔다.
+     * 값이 조금 낡는 것은 상관없지만, 다른 스레드가 쓴 리스트를 절반만 보는 것은 곤란하다.</p>
+     */
+    private volatile List<String> cachedIds = List.of();
+    private volatile long cachedAt;
 
     public WorldBackUpCommand(WorldBackUpPlugin plugin) {
         this.plugin = plugin;
@@ -208,7 +213,6 @@ public final class WorldBackUpCommand {
         line(sender, "/wb list [페이지|날짜]", "백업 목록을 봅니다");
         line(sender, "/wb list days", "날짜별로 몇 개씩 있는지 봅니다");
         line(sender, "/wb info [ID|번호]", "백업 상세 정보를 봅니다");
-        line(sender, "/wb restore", "되돌릴 시점을 목록에서 고릅니다");
         line(sender, "/wb restore", "되돌릴 시점을 목록에서 골라 클릭합니다");
         line(sender, "/wb restore [ID|번호] (worlds)", "그 시점으로 되돌립니다");
         line(sender, "/wb restore at [시각]", "시각으로 찾아 되돌립니다 (03:00, 9h)");
