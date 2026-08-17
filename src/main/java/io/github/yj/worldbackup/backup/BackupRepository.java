@@ -577,28 +577,49 @@ public final class BackupRepository {
 
         List<BackupEntry> survivors = new ArrayList<>();
         long total = 0L;
-        int completeLeft = 0;
         for (BackupEntry entry : all) {
             if (toDelete.contains(entry)) continue;
-            survivors.add(entry);
+            survivors.add(entry); // 최신순
             total += entry.archiveBytes();
-            if (entry.complete()) completeLeft++;
         }
         if (total <= settings.maxTotalBytes()) return;
 
+        // 남길 것을 먼저 확정한다. 이걸 "지우다 보니 남은 것" 으로 두면, 오래된 기준 백업을
+        // 건너뛰는 사이에 정작 최신 백업이 먼저 지워진다. 최소 보관 개수는 <b>최신</b> 쪽을
+        // 지켜야 의미가 있다.
+        Set<BackupEntry> mustKeep = new HashSet<>();
+        int kept = 0;
+        for (BackupEntry entry : survivors) {
+            if (isPinned(entry) || entry.protectedFrom(settings.protectManual())) {
+                mustKeep.add(entry);
+                continue;
+            }
+            // 손상된 백업은 복원에 못 쓰므로 최소 개수에 세지 않는다. 용량만 차지하니 먼저 나간다.
+            if (entry.complete() && kept < settings.minBackups()) {
+                mustKeep.add(entry);
+                kept++;
+            }
+        }
+
         long before = total;
         List<String> removed = new ArrayList<>();
-        for (int i = survivors.size() - 1; i >= 0 && total > settings.maxTotalBytes(); i--) {
-            BackupEntry entry = survivors.get(i); // 오래된 것부터
-            if (isPinned(entry)) continue;
-            if (entry.protectedFrom(settings.protectManual())) continue;
-            if (blockingDependent(entry, dependentsByBase, toDelete) != null) continue;
-            if (entry.complete() && completeLeft <= settings.minBackups()) break;
 
-            toDelete.add(entry);
-            total -= entry.archiveBytes();
-            if (entry.complete()) completeLeft--;
-            removed.add(entry.id());
+        // 한 번만 훑으면 상한을 못 맞출 수 있다. 가장 오래된 것이 차등본을 거느린 기준 백업이면
+        // (= 대개 가장 큰 파일이면) 그때는 못 지우고 지나가는데, 뒤이어 그 차등본들이 지워지면서
+        // 비로소 지울 수 있게 된다. 변화가 없을 때까지 돌아야 "이 값을 넘지 않는다"가 보장된다.
+        boolean removedAny = true;
+        while (removedAny && total > settings.maxTotalBytes()) {
+            removedAny = false;
+            for (int i = survivors.size() - 1; i >= 0 && total > settings.maxTotalBytes(); i--) {
+                BackupEntry entry = survivors.get(i); // 오래된 것부터
+                if (toDelete.contains(entry) || mustKeep.contains(entry)) continue;
+                if (blockingDependent(entry, dependentsByBase, toDelete) != null) continue;
+
+                toDelete.add(entry);
+                total -= entry.archiveBytes();
+                removed.add(entry.id());
+                removedAny = true;
+            }
         }
 
         if (!removed.isEmpty()) {

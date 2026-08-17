@@ -43,6 +43,10 @@ public final class WorldBackUpCommand {
 
     private static final int PAGE_SIZE = 8;
 
+    /** 채팅창이 넘치지 않도록 한 화면에 뿌릴 최대 줄 수. */
+    private static final int DAY_VIEW_LIMIT = 20;
+    private static final int DAY_LIST_LIMIT = 30;
+
     private static final DateTimeFormatter TIME_ONLY =
             DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault());
 
@@ -263,8 +267,13 @@ public final class WorldBackUpCommand {
 
         Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>" + day + dayLabel(day) + "</aqua> <gray>("
                 + entries.size() + "개)</gray>");
-        for (BackupEntry entry : entries) {
+        for (BackupEntry entry : entries.stream().limit(DAY_VIEW_LIMIT).toList()) {
             Msg.sendRaw(sender, "  " + entryLine(entry));
+        }
+        if (entries.size() > DAY_VIEW_LIMIT) {
+            Msg.sendRaw(sender, "  <dark_gray>… " + (entries.size() - DAY_VIEW_LIMIT)
+                    + "개 더 있습니다. 시각을 아시면 <white>/wb restore at " + day + " 03:00</white> "
+                    + "처럼 바로 지정하세요.</dark_gray>");
         }
         Msg.sendRaw(sender, "<click:run_command:'/wb list days'><dark_gray>» 날짜 목록으로</dark_gray></click>");
     }
@@ -291,7 +300,14 @@ public final class WorldBackUpCommand {
         Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>날짜별 백업</aqua> <gray>("
                 + entries.size() + "개, " + byDay.size() + "일)</gray>");
 
+        int shown = 0;
         for (Map.Entry<LocalDate, List<BackupEntry>> day : byDay.entrySet()) {
+            if (shown++ >= DAY_LIST_LIMIT) {
+                Msg.sendRaw(sender, " <dark_gray>… " + (byDay.size() - DAY_LIST_LIMIT)
+                        + "일 더 있습니다. <white>/wb list " + entries.get(entries.size() - 1).localDate()
+                        + "</white> 처럼 날짜를 직접 넣으세요.</dark_gray>");
+                break;
+            }
             List<BackupEntry> ofDay = day.getValue(); // 최신순
             String newest = TIME_ONLY.format(ofDay.get(0).createdAt());
             String oldest = TIME_ONLY.format(ofDay.get(ofDay.size() - 1).createdAt());

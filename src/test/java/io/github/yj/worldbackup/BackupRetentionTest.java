@@ -403,6 +403,31 @@ class BackupRetentionTest {
         assertEquals(3, ids(repo).size(), "용량보다 최소 보관 개수가 우선한다");
     }
 
+    /**
+     * 가장 오래된 것이 차등본을 거느린 기준 백업이면 한 번에 못 지운다.
+     *
+     * <p>기준은 딸린 차등본이 살아 있는 동안 못 지우는데, 그 차등본들은 기준보다 뒤에서
+     * 지워진다. 한 번만 훑으면 기준을 지나친 뒤에야 지울 수 있게 되어 상한을 넘긴 채
+     * 끝난다. 정작 기준이 가장 큰 파일인 경우가 많다.</p>
+     */
+    @Test
+    void totalSizeCapReachesTheLimitEvenWhenABaseBlocksTheFirstPass() throws Exception {
+        BackupRepository repo = repository();
+        // 오래된 순: base(2MB) → d1 → d2, 그리고 최근 것 하나
+        BackupEntry base = putSized(repo, "base", at(9, 12), 2 * ONE_MB, null);
+        putSized(repo, "d1", at(8, 12), ONE_MB, base.id());
+        putSized(repo, "d2", at(7, 12), ONE_MB, base.id());
+        putSized(repo, "recent", at(1, 12), ONE_MB, null);
+
+        // 총 5MB. 상한 1.5MB → recent 만 남아야 한다.
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-total-size-gb", 1.5 / 1024.0);
+            cfg.set("retention.min-backups", 1);
+        }));
+
+        assertEquals(List.of("recent"), ids(repo), "기준 백업까지 지워 상한을 맞춰야 한다");
+    }
+
     /** /wb lock 은 어떤 정책보다도 세다. 총 용량 상한도 예외가 아니다. */
     @Test
     void lockedBackupsSurviveTheTotalSizeCap() throws Exception {
@@ -427,11 +452,16 @@ class BackupRetentionTest {
      */
     private BackupEntry putSized(BackupRepository repo, String id, Instant createdAt, int bytes)
             throws IOException {
+        return putSized(repo, id, createdAt, bytes, null);
+    }
+
+    private BackupEntry putSized(BackupRepository repo, String id, Instant createdAt, int bytes, String baseId)
+            throws IOException {
         Path archive = repo.directory().resolve(BackupEntry.archiveName(id));
         Files.write(archive, new byte[bytes]);
         BackupEntry entry = new BackupEntry(id, archive, createdAt, BackupType.SCHEDULED, null,
                 Files.size(archive), 0L, 0, List.of("world"), List.of("world"), List.of(),
-                "test", false, true, null, true);
+                "test", false, true, baseId, true);
         repo.writeMeta(entry);
         return entry;
     }
