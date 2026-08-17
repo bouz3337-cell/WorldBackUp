@@ -6,6 +6,8 @@ import io.github.yj.worldbackup.backup.BackupService;
 import io.github.yj.worldbackup.backup.BackupType;
 import io.github.yj.worldbackup.backup.ServerBridge;
 import io.github.yj.worldbackup.config.BackupSettings;
+import io.github.yj.worldbackup.restore.PendingRestore;
+import io.github.yj.worldbackup.restore.RestoreApplier;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,12 +21,15 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.Callable;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -467,7 +472,93 @@ class BackupServiceTest {
     }
 
     // ------------------------------------------------------------------
+    // 플러그인 자기 폴더
+
+    /**
+     * 자기 설정은 담고, 자기 상태는 담지 않는다.
+     *
+     * <p>{@code config.yml} 이 빠지면 서버를 되돌려도 <b>그 시점의 보관 정책은 되돌아오지
+     * 않는다.</b> 반대로 상태 파일이 담기면 복원이 그것을 되살리는데, 그 결과가 파일마다 다르게
+     * 나쁘다 - 복원 예약이 되살아나면 다음 부팅이 또 복원하고, 실패 표식이 되살아나면 아무도
+     * 손대지 않은 서버가 영구히 정지 상태로 들어간다.</p>
+     *
+     * <p>{@code extra-paths} 에 {@code plugins} 를 통째로 넣은 서버가 가장 위험하므로 그 설정으로
+     * 확인한다. 그때는 우리 폴더가 <b>다른 대상 안에서</b> 훑어지므로, 대상 목록을 고르는
+     * 단계에서 빼는 것만으로는 막히지 않는다. 실제 zip 을 열어 본다.</p>
+     */
+    @Test
+    void theOwnConfigTravelsWithTheBackupButItsStateDoesNot() throws Exception {
+        Files.writeString(dataFolder.resolve("config.yml"), "backup:\n  interval-minutes: 30\n",
+                StandardCharsets.UTF_8);
+
+        // 플러그인이 스스로 만들어 쓰는 것들. 하나도 담기면 안 된다.
+        Files.writeString(dataFolder.resolve(PendingRestore.FILE_NAME), "id: x", StandardCharsets.UTF_8);
+        Files.writeString(dataFolder.resolve(PendingRestore.PROCESSING_NAME), "id: x", StandardCharsets.UTF_8);
+        Files.writeString(dataFolder.resolve(PendingRestore.REPORT_NAME), "success: true", StandardCharsets.UTF_8);
+        Files.writeString(dataFolder.resolve(RestoreApplier.FAILURE_PREFIX + "20260818-030000.yml"),
+                "error: x", StandardCharsets.UTF_8);
+        Files.writeString(backupDir.resolve("wb-20260101-000000.zip"), "옛 아카이브", StandardCharsets.UTF_8);
+        Path oldWorld = dataFolder.resolve(RestoreApplier.REPLACED_FOLDER + "/20260818-030000/world");
+        Files.createDirectories(oldWorld);
+        Files.writeString(oldWorld.resolve("level.dat"), "복원이 밀어낸 옛 월드", StandardCharsets.UTF_8);
+
+        configure(cfg -> cfg.set("targets.extra-paths", List.of("plugins")));
+        List<String> names = entryNames(new BackupService(server).runBlocking(BackupType.MANUAL, null, null));
+
+        assertTrue(names.contains("plugins/WorldBackUp/config.yml"),
+                "이것이 빠지면 복원이 보관 정책을 되돌리지 못한다");
+        for (String forbidden : List.of(
+                "plugins/WorldBackUp/" + PendingRestore.FILE_NAME,
+                "plugins/WorldBackUp/" + PendingRestore.PROCESSING_NAME,
+                "plugins/WorldBackUp/" + PendingRestore.REPORT_NAME,
+                "plugins/WorldBackUp/" + RestoreApplier.FAILURE_PREFIX + "20260818-030000.yml",
+                "plugins/WorldBackUp/backups/wb-20260101-000000.zip",
+                "plugins/WorldBackUp/replaced/20260818-030000/world/level.dat")) {
+            assertFalse(names.contains(forbidden), forbidden + " 이 담기면 복원이 그것을 되살린다");
+        }
+    }
+
+    /** 아무도 우리 폴더를 담지 않는 기본 설정에서는 설정 파일 하나를 대상으로 올린다. */
+    @Test
+    void theOwnConfigBecomesItsOwnTargetWhenNothingElseCoversIt() throws Exception {
+        Files.writeString(dataFolder.resolve("config.yml"), "backup: {}", StandardCharsets.UTF_8);
+
+        BackupEntry entry = new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
+
+        assertTrue(entry.roots().contains("plugins/WorldBackUp/config.yml"),
+                "복원이 이 파일을 되돌릴 수 있도록 대상 경로에도 올라야 한다");
+        assertTrue(entryNames(entry).contains("plugins/WorldBackUp/config.yml"));
+    }
+
+    /**
+     * 관리자가 제외 패턴으로 뺐으면 <b>대상 경로에도 올리지 않는다.</b>
+     *
+     * <p>담기지도 않을 경로를 {@code roots} 에 올리면, 복원이 "이 경로에는 데이터가 없다" 는
+     * 경고를 매번 찍는다. 관리자가 직접 뺀 것인데 무언가 잘못된 것처럼 보인다.</p>
+     */
+    @Test
+    void anExcludedOwnConfigIsNotListedAsARestoreTarget() throws Exception {
+        Files.writeString(dataFolder.resolve("config.yml"), "backup: {}", StandardCharsets.UTF_8);
+        configure(cfg -> cfg.set("targets.exclude", List.of("plugins/WorldBackUp/config.yml")));
+
+        BackupEntry entry = new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
+
+        assertFalse(entry.roots().contains("plugins/WorldBackUp/config.yml"));
+        assertFalse(entryNames(entry).contains("plugins/WorldBackUp/config.yml"));
+    }
+
+    // ------------------------------------------------------------------
     // 도우미
+
+    /** 만들어진 아카이브에 실제로 들어간 엔트리 이름들. */
+    private List<String> entryNames(BackupEntry entry) throws IOException {
+        List<String> names = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(entry.archive().toFile(), StandardCharsets.UTF_8)) {
+            Enumeration<? extends ZipEntry> it = zip.entries();
+            while (it.hasMoreElements()) names.add(it.nextElement().getName());
+        }
+        return names;
+    }
 
     private void configure(Consumer<YamlConfiguration> tweak) {
         YamlConfiguration cfg = new YamlConfiguration();

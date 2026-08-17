@@ -1,6 +1,9 @@
 package io.github.yj.worldbackup.config;
 
+import io.github.yj.worldbackup.backup.Archiver;
 import io.github.yj.worldbackup.backup.RetentionTiers;
+import io.github.yj.worldbackup.restore.PendingRestore;
+import io.github.yj.worldbackup.restore.RestoreApplier;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.GlobMatcher;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -68,9 +71,17 @@ public final class BackupSettings {
     private final List<String> preservePatterns;
 
     private final Path serverRoot;
+    private final Path ownConfigFile;
+
+    /** {@code backup.directory} 의 기본값. 값을 옮겨도 옛 아카이브가 이 이름으로 남아 있다. */
+    private static final String DEFAULT_ARCHIVE_FOLDER = "backups";
+
+    /** {@link org.bukkit.plugin.java.JavaPlugin#saveDefaultConfig()} 가 만드는 파일 이름. */
+    private static final String CONFIG_FILE_NAME = "config.yml";
 
     private BackupSettings(FileConfiguration cfg, Path dataFolder, Path serverRoot) {
         this.serverRoot = serverRoot;
+        this.ownConfigFile = dataFolder.resolve(CONFIG_FILE_NAME).toAbsolutePath().normalize();
 
         this.enabled = cfg.getBoolean("backup.enabled", true);
         String mode = String.valueOf(cfg.getString("backup.mode", "differential")).trim().toLowerCase(Locale.ROOT);
@@ -87,8 +98,8 @@ public final class BackupSettings {
         this.broadcastPermission = cfg.getBoolean("backup.broadcast-permission-only", true)
                 ? "worldbackup.notify" : null;
 
-        String dir = cfg.getString("backup.directory", "backups");
-        Path configured = Paths.get(dir == null || dir.isBlank() ? "backups" : dir);
+        String dir = cfg.getString("backup.directory", DEFAULT_ARCHIVE_FOLDER);
+        Path configured = Paths.get(dir == null || dir.isBlank() ? DEFAULT_ARCHIVE_FOLDER : dir);
         this.backupDir = (configured.isAbsolute() ? configured : dataFolder.resolve(configured))
                 .toAbsolutePath().normalize();
 
@@ -99,9 +110,8 @@ public final class BackupSettings {
         this.extraPaths = List.copyOf(cfg.getStringList("targets.extra-paths"));
 
         List<String> excludes = new ArrayList<>(cfg.getStringList("targets.exclude"));
-        // 플러그인 자기 폴더(backups/, replaced/, 예약 파일 등)와 백업 폴더는 절대 백업하지 않는다.
-        // replaced/ 에는 복원 때 밀어낸 옛 월드가 통째로 들어 있어서, 빠뜨리면 백업이 눈덩이처럼 불어난다.
-        addSelfExclusion(excludes, serverRoot, dataFolder);
+        // 플러그인이 스스로 만들어 쓰는 것들과 백업 폴더는 절대 백업하지 않는다.
+        addOwnStateExclusions(excludes, serverRoot, dataFolder);
         addSelfExclusion(excludes, serverRoot, backupDir);
         this.excludePatterns = List.copyOf(excludes);
         this.exclude = new GlobMatcher(excludes);
@@ -173,9 +183,51 @@ public final class BackupSettings {
     private static void addSelfExclusion(List<String> excludes, Path serverRoot, Path own) {
         String relative = FileUtil.relativize(serverRoot, own);
         if (relative == null) return; // 서버 폴더 밖이면 애초에 백업되지 않는다
-        if (!excludes.contains(relative)) excludes.add(relative);
-        String subtree = relative + "/**";
-        if (!excludes.contains(subtree)) excludes.add(subtree);
+        addPattern(excludes, relative);
+        addPattern(excludes, relative + "/**");
+    }
+
+    /**
+     * 플러그인이 <b>스스로 만들어 쓰는 상태</b>만 백업에서 뺀다.
+     *
+     * <p>예전에는 데이터 폴더를 통째로 제외했는데, 그러면 {@code config.yml} 도 함께 빠졌다.
+     * 서버를 그 시점으로 되돌려도 <b>보관 정책만은 되돌아오지 않는다</b>는 뜻이라, 백업이 어떻게
+     * 만들어졌는지가 정작 백업 안에 없었다. 그래서 제외를 "우리 폴더 전체" 에서 "우리가 쓰는
+     * 상태" 로 좁힌다.</p>
+     *
+     * <p>이름은 전부 <b>원래 정의된 곳의 상수</b>에서 가져온다. 문자열을 여기 옮겨 적으면 한쪽만
+     * 바뀌었을 때 그 파일이 조용히 백업에 담기는데, 담기면 특히 나쁜 것이 셋 있다.</p>
+     * <ul>
+     *   <li>{@code backups/} · {@code replaced/} - 월드가 몇 벌씩 들어 있다. 빠뜨리면 백업이
+     *       자기를 삼키며 눈덩이처럼 불어난다.</li>
+     *   <li>{@link PendingRestore#FILE_NAME} - 복원 <b>예약</b>이다. 백업에 담겨 복원으로
+     *       되살아나면 그 다음 부팅이 또 복원을 시작한다.</li>
+     *   <li>{@link RestoreApplier#FAILURE_PREFIX} 표식 - 이 파일이 있는 동안 자동 백업이 멈춘다.
+     *       옛 표식이 되살아나면 아무도 손대지 않은 서버가 영구히 정지 상태로 들어간다.</li>
+     * </ul>
+     */
+    private static void addOwnStateExclusions(List<String> excludes, Path serverRoot, Path dataFolder) {
+        String base = FileUtil.relativize(serverRoot, dataFolder);
+        if (base == null) return; // 서버 폴더 밖이면 애초에 백업되지 않는다
+
+        for (String folder : List.of(DEFAULT_ARCHIVE_FOLDER, RestoreApplier.REPLACED_FOLDER)) {
+            addPattern(excludes, base + "/" + folder);
+            addPattern(excludes, base + "/" + folder + "/**");
+        }
+        for (String file : List.of(
+                PendingRestore.FILE_NAME,
+                PendingRestore.PROCESSING_NAME,
+                PendingRestore.REPORT_NAME,
+                // .yml 과 해제된 .yml.resolved 를 함께 잡는다
+                RestoreApplier.FAILURE_PREFIX + "*",
+                // 원자적 쓰기가 쓰다 만 조각
+                "*" + Archiver.TEMP_SUFFIX)) {
+            addPattern(excludes, base + "/" + file);
+        }
+    }
+
+    private static void addPattern(List<String> excludes, String pattern) {
+        if (!excludes.contains(pattern)) excludes.add(pattern);
     }
 
     /**
@@ -347,4 +399,16 @@ public final class BackupSettings {
     public List<String> preservePatterns() { return preservePatterns; }
 
     public Path serverRoot() { return serverRoot; }
+
+    /**
+     * 플러그인 자기 {@code config.yml} 의 절대 경로. 이것도 백업에 담는다.
+     *
+     * <p>담지 않으면 서버를 되돌려도 그 시점의 보관 정책은 되돌아오지 않는다 - 백업이 어떻게
+     * 만들어졌는지가 백업 안에 없는 셈이다. 나머지 자기 폴더(아카이브·{@code replaced/}·예약
+     * 파일·실패 표식)는 {@link #exclude()} 가 계속 막는다.</p>
+     *
+     * <p>원치 않으면 {@code targets.exclude} 에 이 경로를 넣으면 된다. 그때는 대상으로도
+     * 잡히지 않는다.</p>
+     */
+    public Path ownConfigFile() { return ownConfigFile; }
 }

@@ -51,6 +51,15 @@ public final class RestoreApplier {
      */
     public static final String FAILURE_PREFIX = "restore-failed-";
 
+    /**
+     * 복원이 밀어낸 옛 파일을 모아 두는 폴더 이름.
+     *
+     * <p>여기에는 월드가 몇 벌씩 쌓인다. 백업 제외 패턴이 이 이름을 알아야 하므로
+     * ({@link io.github.yj.worldbackup.config.BackupSettings}) 상수로 둔다 - 문자열을
+     * 양쪽에 따로 적으면 한쪽만 바뀌었을 때 백업이 자기 잔재를 삼킨다.</p>
+     */
+    public static final String REPLACED_FOLDER = "replaced";
+
     /** 복원이 성공하면 옛 실패 기록에 이 꼬리표를 붙여 둔다. 기록은 남기되 정지는 풀기 위함이다. */
     private static final String RESOLVED_SUFFIX = ".resolved";
 
@@ -173,7 +182,7 @@ public final class RestoreApplier {
 
             Path replacedDir = null;
             if (pending.keepReplaced()) {
-                replacedDir = dataFolder.resolve("replaced").resolve(STAMP.format(Instant.now()));
+                replacedDir = dataFolder.resolve(REPLACED_FOLDER).resolve(STAMP.format(Instant.now()));
                 Files.createDirectories(replacedDir);
                 log.info("[WorldBackUp] 교체되는 기존 파일은 " + replacedDir + " 로 옮깁니다.");
             }
@@ -587,7 +596,7 @@ public final class RestoreApplier {
      */
     public static void cleanupReplaced(Path dataFolder, int keep, Logger log) {
         if (keep <= 0) return;
-        Path replaced = dataFolder.resolve("replaced");
+        Path replaced = dataFolder.resolve(REPLACED_FOLDER);
         if (!Files.isDirectory(replaced)) return;
 
         List<Path> snapshots;

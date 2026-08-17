@@ -320,6 +320,7 @@ public final class BackupService {
                     server.logger().warning("[백업] extra-paths 경로를 찾을 수 없습니다: " + relative);
                 }
             }
+            addOwnConfig(settings, serverRoot, targets);
             if (targets.isEmpty()) {
                 throw new IllegalStateException("백업할 대상이 없습니다. config.yml 의 targets 설정을 확인하세요.");
             }
@@ -468,6 +469,34 @@ public final class BackupService {
             repo.unpin();
             thawWorlds();
         }
+    }
+
+    /**
+     * 플러그인 자기 {@code config.yml} 을 백업 대상에 넣는다.
+     *
+     * <p>담지 않으면 서버를 되돌려도 <b>그 시점의 보관 정책은 되돌아오지 않는다.</b> 백업이
+     * 어떻게 만들어졌는지가 정작 백업 안에 없는 셈이다. 나머지 자기 폴더(아카이브 ·
+     * {@code replaced/} · 복원 예약 · 실패 표식)는 제외 패턴이 계속 막는다.</p>
+     *
+     * <p>세 경우에 조용히 건너뛴다 - 파일이 없을 때, 서버 폴더 밖일 때(그러면 담을 수 없다),
+     * 그리고 관리자가 {@code targets.exclude} 로 직접 뺐을 때. 마지막 것을 여기서 걸러야
+     * 하는 이유는 하나뿐이다: 담기지도 않을 경로를 {@code roots} 에 올리면, 복원이 "이 경로에는
+     * 데이터가 없다" 는 경고를 매번 찍는다.</p>
+     */
+    private void addOwnConfig(BackupSettings settings, Path serverRoot, List<Path> targets) {
+        Path ownConfig = settings.ownConfigFile();
+        if (ownConfig == null || !Files.isRegularFile(ownConfig)) return;
+
+        String relative = FileUtil.relativize(serverRoot, ownConfig);
+        if (relative == null || settings.exclude().matchesFile(relative)) return;
+
+        // 이미 다른 대상(extra-paths 에 "plugins" 를 넣은 경우 등) 안에 들어 있으면 그쪽에
+        // 맡긴다. 여기서 또 넣으면 dedupeTargets 가 걸러 내면서 경고를 한 줄 남기는데,
+        // 관리자가 하지도 않은 설정을 지적하는 것처럼 보인다.
+        for (Path target : targets) {
+            if (ownConfig.startsWith(target.toAbsolutePath().normalize())) return;
+        }
+        targets.add(ownConfig);
     }
 
     /**
