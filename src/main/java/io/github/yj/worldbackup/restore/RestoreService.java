@@ -60,7 +60,7 @@ public final class RestoreService {
             return;
         }
 
-        List<String> roots = selectedRoots(entry, worldsOnly);
+        List<String> roots = selectedRoots(entry.roots(), entry.worlds(), worldsOnly);
         if (worldsOnly && roots.isEmpty()) {
             Msg.send(sender, "<red>이 백업에서 월드 폴더를 찾을 수 없어 <white>worlds</white> 복원을 할 수 없습니다.</red>");
             Msg.send(sender, "<gray>월드 정보가 없는 백업입니다. 전체를 되돌리려면 "
@@ -132,7 +132,7 @@ public final class RestoreService {
         String line = " <gray>공간     :</gray> <white>" + FileUtil.humanBytes(needed)
                 + "</white> <dark_gray>필요 · " + FileUtil.humanBytes(free) + " 남음</dark_gray>";
 
-        if (free < needed) {
+        if (!hasRoomToConfirm(needed, free)) {
             Msg.sendRaw(sender, line);
             Msg.sendRaw(sender, "");
             Msg.send(sender, "<red><bold>디스크 여유 공간이 부족해 복원을 시작할 수 없습니다.</bold></red>");
@@ -144,11 +144,10 @@ public final class RestoreService {
             return false;
         }
 
-        long spare = free - needed;
-        if (spare < plugin.settings().minFreeDiskBytes()) {
+        if (isTightAfterRestore(needed, free, plugin.settings().minFreeDiskBytes())) {
             Msg.sendRaw(sender, line + " <yellow>(빠듯합니다)</yellow>");
             Msg.sendRaw(sender, " <yellow>복원 뒤 남는 공간이 "
-                    + FileUtil.humanBytes(spare) + " 뿐입니다.</yellow>");
+                    + FileUtil.humanBytes(free - needed) + " 뿐입니다.</yellow>");
         } else {
             Msg.sendRaw(sender, line);
         }
@@ -216,11 +215,8 @@ public final class RestoreService {
         BackupSettings settings = plugin.settings();
         Path dataFolder = plugin.getDataFolder().toPath();
 
-        // 백업에서 제외했던 파일(로그, 캐시 등)은 복원 때도 건드리지 않는다.
-        List<String> preserve = new ArrayList<>(settings.preservePatterns());
-        for (String pattern : current.entry().excludes()) {
-            if (!preserve.contains(pattern)) preserve.add(pattern);
-        }
+        // 백업에서 제외했던 파일(로그, 캐시, 플러그인 자기 상태)은 복원 때도 건드리지 않는다.
+        List<String> preserve = restorePreserve(settings.preservePatterns(), current.entry().excludes());
 
         // 차등 백업은 기준이 되는 전체 백업까지 있어야 복원할 수 있다.
         Path baseArchive = plugin.repository().base(current.entry())
@@ -295,25 +291,71 @@ public final class RestoreService {
         Bukkit.shutdown();
     }
 
+    // ------------------------------------------------------------------
+    // 판단만 떼어 낸 것들
+    //
+    // 이 셋은 서버를 만지지 않으므로 경계를 그대로 검증할 수 있다. {@code public} 인 이유는
+    // 하나뿐이다 - 잘못되면 복원이 <b>요청하지 않은 파일을 덮어쓰거나</b>, 되돌릴 수 있었던
+    // 복원을 막는다. 위쪽 흐름은 서버 없이 돌릴 수 없으니 적어도 판단은 테스트로 못 박아 둔다.
+    // (BackupService#hasAmpleRoom, RestoreApplier#hasRoomToRestore 와 같은 규칙이다)
+
     /**
      * worldsOnly 옵션에 따라 복원할 최상위 경로를 고른다.
      *
      * <p>월드를 하나도 찾지 못하면 <b>빈 목록</b>을 돌려준다. 예전에는 전체 경로로 되돌아갔는데,
      * "월드만" 을 요청한 관리자가 경고 한 줄 없이 {@code server.properties} 까지 덮어쓰게 되어
      * 위험했다. 호출자가 이 경우를 명시적으로 거부한다.</p>
+     *
+     * @param roots  백업에 담긴 최상위 경로들 (서버 폴더 기준 상대 경로)
+     * @param worlds 그 백업에 담긴 월드 이름들
      */
-    private List<String> selectedRoots(BackupEntry entry, boolean worldsOnly) {
-        if (!worldsOnly) return entry.roots();
-        List<String> roots = new ArrayList<>();
-        for (String root : entry.roots()) {
-            for (String world : entry.worlds()) {
+    public static List<String> selectedRoots(List<String> roots, List<String> worlds, boolean worldsOnly) {
+        if (!worldsOnly) return roots;
+        List<String> selected = new ArrayList<>();
+        for (String root : roots) {
+            for (String world : worlds) {
                 if (root.equalsIgnoreCase(world) || root.toLowerCase(Locale.ROOT)
                         .endsWith("/" + world.toLowerCase(Locale.ROOT))) {
-                    roots.add(root);
+                    selected.add(root);
                     break;
                 }
             }
         }
-        return roots;
+        return selected;
+    }
+
+    /**
+     * 복원 때 덮어쓰지 않고 그대로 둘 패턴.
+     *
+     * <p>백업에서 제외했던 것(로그·캐시·플러그인 자기 상태)은 복원 때도 건드리지 않는다.
+     * 그 목록이 빠지면 복원이 <b>백업에 없는 파일을 지우기만</b> 한다.</p>
+     *
+     * @param configured      {@code restore.preserve} 설정
+     * @param archiveExcludes 그 백업을 만들 때 쓰인 제외 패턴
+     */
+    public static List<String> restorePreserve(List<String> configured, List<String> archiveExcludes) {
+        List<String> preserve = new ArrayList<>(configured);
+        for (String pattern : archiveExcludes) {
+            if (!preserve.contains(pattern)) preserve.add(pattern);
+        }
+        return preserve;
+    }
+
+    /**
+     * 확정해도 되는 공간이 있는지.
+     *
+     * <p>{@code needed} 가 0 이하면 크기를 기록하지 않던 옛 백업이다. 그때는 <b>막지 않는다</b> -
+     * 알 수 없다는 이유로 되돌릴 방법을 없애는 것보다, {@code onLoad} 의 정확한 점검에
+     * 맡기는 편이 낫다.</p>
+     */
+    public static boolean hasRoomToConfirm(long neededBytes, long freeBytes) {
+        if (neededBytes <= 0) return true;
+        return freeBytes >= neededBytes;
+    }
+
+    /** 복원 뒤 남는 공간이 설정한 최소 여유보다 적은지. 막지는 않고 경고만 하는 데 쓴다. */
+    public static boolean isTightAfterRestore(long neededBytes, long freeBytes, long minFreeBytes) {
+        if (!hasRoomToConfirm(neededBytes, freeBytes) || neededBytes <= 0) return false;
+        return freeBytes - neededBytes < minFreeBytes;
     }
 }
