@@ -589,16 +589,25 @@ public final class BackupRepository {
         // 지켜야 의미가 있다.
         Set<BackupEntry> mustKeep = new HashSet<>();
         int kept = 0;
+
+        // 1차: 보호·고정된 것은 어차피 남는다. 최소 개수에도 <b>포함해서</b> 센다
+        // (rescueToMinimum 이 그렇게 세므로 두 곳의 기준이 같아야 한다).
+        // 이걸 먼저 다 세어야 한다. 한 번에 훑으면 잠근 백업이 목록 뒤쪽(오래된 쪽)에 있을 때
+        // 그걸 만나기도 전에 최신 백업이 최소 개수 몫으로 확보되어, 결국 하나를 더 남기게 된다.
         for (BackupEntry entry : survivors) {
             if (isPinned(entry) || entry.protectedFrom(settings.protectManual())) {
                 mustKeep.add(entry);
-                continue;
+                if (entry.complete()) kept++;
             }
-            // 손상된 백업은 복원에 못 쓰므로 최소 개수에 세지 않는다. 용량만 차지하니 먼저 나간다.
-            if (entry.complete() && kept < settings.minBackups()) {
-                mustKeep.add(entry);
-                kept++;
-            }
+        }
+
+        // 2차: 모자란 만큼만 최신 쪽에서 채운다.
+        // 손상된 백업은 복원에 못 쓰므로 세지 않는다. 용량만 차지하니 먼저 나간다.
+        for (BackupEntry entry : survivors) { // 최신순
+            if (kept >= settings.minBackups()) break;
+            if (mustKeep.contains(entry) || !entry.complete()) continue;
+            mustKeep.add(entry);
+            kept++;
         }
 
         long before = total;

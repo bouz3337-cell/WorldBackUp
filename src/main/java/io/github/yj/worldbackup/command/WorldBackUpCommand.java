@@ -18,6 +18,7 @@ import io.github.yj.worldbackup.util.TimeToken;
 import io.papermc.paper.command.brigadier.CommandSourceStack;
 import io.papermc.paper.command.brigadier.Commands;
 import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Player;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -483,6 +484,18 @@ public final class WorldBackUpCommand {
      * 같은 백업 하나로 모이는데, 그걸 여러 줄로 늘어놓으면 선택지가 많은 것처럼 착각하게 된다.</p>
      */
     private void restoreMenu(CommandSender sender) {
+        // 목록을 띄워 놓고 눌렀을 때 거부하면 왜 안 되는지 알 수 없다. 먼저 알린다.
+        if (plugin.restoreService().isCountingDown()) {
+            Msg.send(sender, "<red>이미 복원 카운트다운이 진행 중입니다. "
+                    + "<white>/wb cancel</white> 로 취소하세요.</red>");
+            return;
+        }
+        if (plugin.backupService().isRunning()) {
+            Msg.send(sender, "<red>백업이 진행 중이라 지금은 복원할 수 없습니다. "
+                    + "<gray>(" + plugin.backupService().progressText() + ")</gray></red>");
+            return;
+        }
+
         List<BackupEntry> entries = plugin.repository().list().stream()
                 .filter(BackupEntry::complete)
                 .toList();
@@ -532,8 +545,12 @@ public final class WorldBackUpCommand {
             tags += entry.playerDataUnknown()
                     ? " <yellow>[플레이어?]</yellow>" : " <red>[플레이어없음]</red>";
         }
-        Msg.sendRaw(sender, " <hover:show_text:'<gray>" + entry.displayTime()
-                + " 시점으로 되돌립니다</gray>'><click:run_command:'/wb restore " + entry.id() + "'>"
+        // 콘솔은 클릭할 수 없다. ID 가 안 보이면 목록만 보고 아무것도 못 하므로 직접 적어 준다.
+        if (!(sender instanceof Player)) tags += " <dark_gray>" + entry.id() + "</dark_gray>";
+
+        Msg.sendRaw(sender, " <hover:show_text:'<gray>" + entry.id() + "</gray>"
+                + "<newline><gray>" + entry.displayTime() + " 시점으로 되돌립니다</gray>'>"
+                + "<click:run_command:'/wb restore " + entry.id() + "'>"
                 + "<green>[" + label + "]</green></click></hover>"
                 + " <white>" + entry.displayTime() + "</white>"
                 + " <dark_gray>·</dark_gray> <aqua>" + FileUtil.humanBytes(entry.archiveBytes()) + "</aqua>"

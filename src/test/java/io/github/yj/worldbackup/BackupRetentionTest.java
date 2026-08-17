@@ -357,6 +357,7 @@ class BackupRetentionTest {
     /** 1 MB 짜리 백업 6개 = 6 MB. 상한을 3.5 MB 로 잡으면 3개만 들어간다. */
     private static final int ONE_MB = 1024 * 1024;
     private static final double CAP_3_5_MB = 3.5 / 1024.0;   // GB 단위
+    private static final double CAP_1_5_MB = 1.5 / 1024.0;   // 1개만 들어간다
     private static final double CAP_TINY = 0.0000001;        // 사실상 0 - 아무것도 못 담는다
 
     @Test
@@ -426,6 +427,33 @@ class BackupRetentionTest {
         }));
 
         assertEquals(List.of("recent"), ids(repo), "기준 백업까지 지워 상한을 맞춰야 한다");
+    }
+
+    /**
+     * 보호된 백업도 최소 보관 개수에 포함해서 센다.
+     *
+     * <p>{@code rescueToMinimum} 이 그렇게 세므로 용량 상한 쪽도 같아야 한다. 따로 세면
+     * 잠근 백업이 많을 때 최소 개수만큼을 그 위에 <b>또</b> 남기게 되어, 그만큼 상한을 못 맞춘다.</p>
+     */
+    @Test
+    void protectedBackupsCountTowardTheMinimumUnderTheSizeCap() throws Exception {
+        BackupRepository repo = repository();
+        BackupEntry locked = putSized(repo, "locked", at(9, 12), ONE_MB);
+        assertTrue(repo.setLocked(locked, true));
+        for (int i = 1; i <= 4; i++) {
+            putSized(repo, "b" + i, at(i, 12), ONE_MB);
+        }
+
+        // 총 5MB, 상한 1.5MB(=1개만 들어감), 최소 1개.
+        // 잠근 것 하나가 이미 최소 개수를 채우므로 나머지 넷은 전부 나가야 한다.
+        // 따로 세면 b1 이 최소 개수 몫으로 하나 더 남아 상한을 못 맞춘다.
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-total-size-gb", CAP_1_5_MB);
+            cfg.set("retention.min-backups", 1);
+        }));
+
+        assertEquals(List.of("locked"), ids(repo),
+                "잠근 백업이 최소 개수를 채웠으므로 나머지는 상한에 맞춰 정리된다");
     }
 
     /** /wb lock 은 어떤 정책보다도 세다. 총 용량 상한도 예외가 아니다. */
