@@ -619,14 +619,23 @@ public final class RestoreApplier {
         }
     }
 
-    /** 폴더 안의 내용을 비운다. preserve 패턴과 삭제 실패 파일은 남는다. */
+    /**
+     * 폴더 안의 내용을 비운다. preserve 패턴과 삭제 실패 파일은 남는다.
+     *
+     * <p>뿌리가 심볼릭 링크면 링크를 <b>따라 들어가</b> 안을 비운다({@link FileUtil#walkOptions}).
+     * 따르지 않으면 링크가 디렉터리로 취급되지 않아 링크 <b>자체</b>가 {@code replaced/} 로
+     * 치워지고, 그 자리에 압축이 풀리면서 월드가 엉뚱한 디스크에 새로 만들어진다. 월드를 다른
+     * 디스크에 두려고 걸어 둔 링크가 복원 한 번에 사라지는 것이다. 링크를 따라가면 아래
+     * {@code postVisitDirectory} 가 뿌리를 지우지 않으므로 링크는 그대로 남는다.</p>
+     */
     private static void clearDirectory(Path directory,
                                        Path serverRoot,
                                        GlobMatcher preserve,
                                        Path replacedDir,
                                        Stats stats,
                                        Logger log) throws IOException {
-        Files.walkFileTree(directory, new SimpleFileVisitor<>() {
+        Files.walkFileTree(directory, FileUtil.walkOptions(directory), Integer.MAX_VALUE,
+                new SimpleFileVisitor<>() {
 
             /**
              * 통째로 보존할 폴더는 들어가지 않는다. {@link io.github.yj.worldbackup.backup.Archiver}

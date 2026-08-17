@@ -1,15 +1,19 @@
 package io.github.yj.worldbackup.util;
 
 import java.io.IOException;
+import java.nio.file.FileVisitOption;
 import java.nio.file.FileVisitResult;
+import java.nio.file.FileVisitor;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 public final class FileUtil {
 
@@ -43,6 +47,28 @@ public final class FileUtil {
     }
 
     /**
+     * 이 뿌리를 훑을 때 쓸 순회 옵션.
+     *
+     * <p>뿌리가 <b>심볼릭 링크면 링크를 따라간다.</b> {@link Files#walkFileTree(Path, FileVisitor)}
+     * 는 기본적으로 링크를 따르지 않는데, 그러면 시작 경로가 링크일 때 디렉터리로 취급되지 않고
+     * <b>파일 하나로 방문</b>되어 그 아래가 통째로 빠진다. 백업은 성공한 것처럼 끝나고, 복원할
+     * 때가 되어서야 월드가 없다는 것을 알게 된다.</p>
+     *
+     * <p>월드를 다른 디스크에 두고 서버 폴더에서 링크로 걸어 두는 것(월드는 SSD, 서버는 HDD)은
+     * 리눅스 서버에서 흔한 구성이다. 게다가 이 경우 {@code world/players} 처럼 링크를 <b>지나서</b>
+     * 찾은 경로는 정상적으로 잡히는데 상위 링크에 가려 중복으로 걸러지기까지 해서, 지형도
+     * 플레이어 데이터도 없는 백업이 만들어졌다.</p>
+     *
+     * <p>뿌리가 링크가 아니면 예전 그대로 링크를 따르지 않는다 - 월드 안의 링크까지 따라가면
+     * 같은 내용을 두 번 담거나 엉뚱한 곳으로 새어 나갈 수 있다. 뿌리를 일부러 링크로 걸어 둔
+     * 관리자에게만 그 판단을 적용한다. (순환은 {@code walkFileTree} 가 {@code visitFileFailed}
+     * 로 알려 주므로 순회가 터지지 않는다)</p>
+     */
+    public static Set<FileVisitOption> walkOptions(Path root) {
+        return Files.isSymbolicLink(root) ? EnumSet.of(FileVisitOption.FOLLOW_LINKS) : Set.of();
+    }
+
+    /**
      * 백업 대상의 용량을 잰다. 제외 패턴에 걸리는 파일/폴더는 세지 않는다.
      *
      * <p>실제 압축과 <b>같은 기준</b>으로 세야 진행률과 디스크 예상치가 실제와 맞는다.
@@ -69,7 +95,8 @@ public final class FileUtil {
         // 파일마다 Path 를 정규화하는 대신 뿌리 기준으로 이어 붙인다.
         RelativePaths relatives = serverRoot == null ? null : RelativePaths.under(serverRoot, path);
         try {
-            Files.walkFileTree(path, new SimpleFileVisitor<>() {
+            // 압축과 <b>같은 기준</b>으로 훑어야 진행률과 디스크 예상치가 실제와 맞는다.
+            Files.walkFileTree(path, walkOptions(path), Integer.MAX_VALUE, new SimpleFileVisitor<>() {
                 @Override
                 public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
                     if (!filtered) return FileVisitResult.CONTINUE;

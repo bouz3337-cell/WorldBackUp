@@ -236,7 +236,7 @@ public final class Archiver {
         // 한 번 더 훑으므로 이 비용은 파일 수 × 2 로 들어온다.
         FileUtil.RelativePaths relatives = FileUtil.RelativePaths.under(serverRoot, root);
 
-        Files.walkFileTree(root, new SimpleFileVisitor<>() {
+        Files.walkFileTree(root, FileUtil.walkOptions(root), Integer.MAX_VALUE, new SimpleFileVisitor<>() {
 
             /**
              * 폴더별로 "이 아래에 zip 엔트리가 하나라도 쓰였는지" 를 센다.
