@@ -166,6 +166,16 @@ public final class RestoreService {
             Msg.send(sender, "<red>확인 시간이 지났습니다. 처음부터 다시 시도하세요.</red>");
             return;
         }
+        // 요청과 확정 사이(기본 60초)에 자동 백업 주기가 걸릴 수 있다. 그러면 아래 안전 백업이
+        // "이미 백업이 진행 중" 으로 실패하면서 복원이 중단되는데, 그 메시지만으로는 무엇이
+        // 잘못됐는지 알 수 없다. 요청은 살려 둔다 - 잠시 뒤 /wb confirm 만 다시 치면 된다.
+        if (plugin.backupService().isRunning()) {
+            Msg.send(sender, "<red>백업이 진행 중이라 지금은 복원을 시작할 수 없습니다.</red>");
+            Msg.send(sender, "<gray>진행률 " + plugin.backupService().progressText()
+                    + " · 끝나면 <white>/wb confirm</white> 을 다시 입력하세요. "
+                    + "요청은 그대로 남아 있습니다.</gray>");
+            return;
+        }
         confirmation = null;
 
         if (plugin.settings().safetyBackup()) {
@@ -176,6 +186,14 @@ public final class RestoreService {
                         if (error != null) {
                             Msg.send(sender, "<red>안전 백업에 실패해 복원을 중단합니다: "
                                     + Msg.sanitize(String.valueOf(error.getMessage())) + "</red>");
+                            // 여기서 막히면 되돌릴 방법이 아예 없는 것처럼 보인다. 실제로는 안전
+                            // 백업을 포기하면 복원할 수 있고, 하필 그 판단이 필요한 상황(디스크가
+                            // 빠듯하거나 복원 실패 정지 중)에서만 이 경로로 들어온다. 위에 실제
+                            // 원인이 찍히므로 여기서는 원인을 단정하지 않고 선택지만 적는다.
+                            Msg.send(sender, "<gray>공간이 모자란 것이면 자리를 먼저 확보하세요. "
+                                    + "그래도 지금 되돌려야 한다면 <white>restore.create-safety-backup: false</white> "
+                                    + "로 바꾸고 <white>/wb reload</white> 후 다시 시도할 수 있습니다.</gray>");
+                            Msg.send(sender, "<gray>다만 그러면 <red>지금 상태로는 되돌아올 수 없습니다.</red></gray>");
                             return;
                         }
                         Msg.send(sender, "<green>안전 백업 완료: <white>" + entry.id() + "</white></green>");
