@@ -17,11 +17,16 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -101,6 +106,49 @@ class BackupRetentionTest {
         }));
 
         assertEquals(List.of("m4-newest", "m3"), ids(repo), "보호 백업도 상한을 넘으면 오래된 것부터 지운다");
+    }
+
+    /**
+     * 보호 백업 상한이 <b>계단이 남기기로 한 백업</b>까지 지우면 안 된다.
+     *
+     * <p>계단은 "이 시간대에는 되돌릴 지점이 하나 있다" 는 약속이다. 그 자리를 채우고 있는
+     * 백업이 하필 수동 백업이면, {@code max-protected} 가 오래된 순으로 지우면서 그 시간대를
+     * 통째로 비운다. 그런데 {@code /wb status} 는 계속 "계단식 N단계" 를 보여 주므로,
+     * 비었다는 사실은 정작 되돌려야 하는 날에야 드러난다.</p>
+     */
+    @Test
+    void maxProtectedDoesNotEvictABackupThatATierIsKeeping() throws Exception {
+        BackupRepository repo = repository();
+        // 계단 1(최신 1개)이 잡는 자리와, 계단 2(24시간 구간)가 잡는 자리.
+        put(repo, "m-newest", Instant.now().minusSeconds(600), BackupType.MANUAL, null);
+        put(repo, "m-yesterday", Instant.now().minusSeconds(30 * 3600L), BackupType.MANUAL, null);
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.tiers", List.of(
+                    Map.of("every", "0", "keep", 1),
+                    Map.of("every", "24h", "keep", 3)));
+            cfg.set("retention.protect-manual", true);
+            cfg.set("retention.max-protected", 1); // 상한은 1이지만 계단이 둘 다 필요하다
+        }));
+
+        assertEquals(List.of("m-newest", "m-yesterday"), ids(repo),
+                "계단이 붙잡은 자리는 보호 상한보다 우선한다");
+    }
+
+    /** 계단 밖의 보호 백업은 그대로 상한에 걸린다. 위 예외가 상한을 무력화하지는 않는다. */
+    @Test
+    void maxProtectedStillEvictsProtectedBackupsOutsideEveryTier() throws Exception {
+        BackupRepository repo = repository();
+        put(repo, "m-newest", Instant.now().minusSeconds(600), BackupType.MANUAL, null);
+        put(repo, "m-ancient", at(300, 12), BackupType.MANUAL, null); // 어떤 계단도 닿지 않는다
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.tiers", List.of(Map.of("every", "0", "keep", 1)));
+            cfg.set("retention.protect-manual", true);
+            cfg.set("retention.max-protected", 1);
+        }));
+
+        assertEquals(List.of("m-newest"), ids(repo), "계단 밖이면 상한이 그대로 동작한다");
     }
 
     @Test
@@ -595,6 +643,28 @@ class BackupRetentionTest {
         assertEquals(1, ids(repo).size(), "전부 손상으로 보여도 하나는 남는다");
     }
 
+    /**
+     * 딸린 차등본을 지운 뒤에는 그 기준 백업도 <b>같은 회차에</b> 지울 수 있어야 한다.
+     *
+     * <p>기준은 대개 딸린 차등본보다 오래되어 목록을 오래된 것부터 훑을 때 먼저 만난다.
+     * 그때는 아직 차등본이 살아 있으니 건너뛰는데, 한 번만 훑으면 그 뒤로 차등본이 지워져도
+     * 기준을 다시 볼 기회가 없다. 정작 기준이 가장 큰 파일인 경우가 많아서, 공간이 급한
+     * 상황에서 확보량이 크게 모자라게 된다. {@code prune} 은 이미 변화가 없을 때까지 돈다.</p>
+     */
+    @Test
+    void freeUpSpaceDeletesABaseOnceItsDifferentialsAreGone() throws Exception {
+        BackupRepository repo = repository();
+        BackupEntry base = putSized(repo, "base", at(9, 12), 4 * ONE_MB, null); // 가장 오래되고 가장 크다
+        putSized(repo, "diff", at(8, 12), ONE_MB, base.id());
+        BackupEntry locked = putSized(repo, "locked", at(1, 12), ONE_MB);
+        assertTrue(repo.setLocked(locked, true)); // 잠긴 백업이 남으므로 기준도 지울 수 있다
+
+        long freed = repo.freeUpSpace(settings(cfg -> cfg.set("retention.min-backups", 0)), 5L * ONE_MB);
+
+        assertEquals(5L * ONE_MB, freed, "차등본이 사라졌으면 그 기준까지 지워 공간을 맞춰야 한다");
+        assertEquals(List.of("locked"), ids(repo));
+    }
+
     /** 잠근 백업은 공간 확보로도 지우지 않는다. */
     @Test
     void freeUpSpaceRespectsLockedBackups() throws Exception {
@@ -694,6 +764,92 @@ class BackupRetentionTest {
         assertFalse(Files.exists(dir.resolve("wb-20260101-000000.zip.tmp")));
         assertFalse(Files.exists(dir.resolve("wb-20260101-000001.yml")));
         assertFalse(Files.exists(dir.resolve("wb-20260101-000002.locked")));
+    }
+
+    // ------------------------------------------------------------------
+    // 목록 캐시
+
+    /**
+     * 훑는 동안 저장소가 바뀌면 그 결과를 캐시에 넣지 않는다.
+     *
+     * <p>{@code list()} 는 짧은 캐시를 둔다. 그런데 스캔이 도는 사이에 다른 스레드가 저장소를
+     * 바꾸면, 스캔이 끝나며 <b>바뀌기 전의 목록</b>을 캐시에 써 넣는다. 캐시 유효 시간 동안
+     * 그 옛 목록이 통용된다.</p>
+     *
+     * <p>여기서는 {@code /wb lock} 을 쓴다. 잠갔다고 답을 받은 백업이 목록에서는 여전히
+     * 안 잠긴 것으로 보이면, 바로 뒤이어 도는 보관 정리가 그 백업을 지운다. 관리자가
+     * 남겨 두려고 잠근 백업이 사라지는 것이라 실패 방향이 최악이다. 보관 정리는 비동기로
+     * 돌고 {@code /wb lock}·탭 완성은 메인 스레드에서 도니 실제로 겹칠 수 있는 구조다.</p>
+     */
+    @Test
+    void aScanThatRacedWithAChangeIsNotCached() throws Exception {
+        GatedRepository repo = new GatedRepository(tmp.resolve("server/plugins/WorldBackUp/backups"));
+        repo.ensureDirectory();
+        put(repo, "a", at(3, 9), BackupType.SCHEDULED, null);
+        put(repo, "b", at(2, 9), BackupType.SCHEDULED, null);
+        put(repo, "c", at(1, 9), BackupType.SCHEDULED, null);
+        repo.arm();
+
+        // 첫 항목을 읽어 낸 직후에 스캔을 붙잡아 둔다.
+        Thread scanner = new Thread(repo::list, "list-scan");
+        scanner.start();
+        assertTrue(repo.scanning.await(5, TimeUnit.SECONDS), "스캔이 시작되어야 한다");
+
+        // 스캔이 이미 읽어 간 그 백업을 잠근다.
+        BackupEntry alreadyRead = repo.firstRead;
+        assertNotNull(alreadyRead, "스캔이 항목 하나는 읽었어야 한다");
+        assertTrue(repo.setLocked(alreadyRead, true));
+
+        repo.released.countDown();
+        scanner.join(5_000);
+
+        BackupEntry reloaded = repo.list().stream()
+                .filter(e -> e.id().equals(alreadyRead.id())).findFirst().orElseThrow();
+        assertTrue(reloaded.locked(),
+                "잠갔다고 답한 백업이 목록에서 안 잠긴 것으로 보이면 보관 정리가 지워 버린다");
+
+        // 보관 정리가 실제로 그 백업을 지키는지까지 확인한다.
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-age-days", 1);
+            cfg.set("retention.max-backups", 1);
+        }));
+        assertTrue(ids(repo).contains(alreadyRead.id()), "잠근 백업은 남아야 한다");
+    }
+
+    /** 첫 항목을 읽어 낸 <b>직후</b> 한 번 멈춰 서서, 스캔이 도는 중임을 테스트가 알 수 있게 한다. */
+    private static final class GatedRepository extends BackupRepository {
+
+        final CountDownLatch scanning = new CountDownLatch(1);
+        final CountDownLatch released = new CountDownLatch(1);
+
+        /** 붙잡기 직전에 스캔이 읽어 낸 항목. */
+        volatile BackupEntry firstRead;
+
+        private final AtomicBoolean gate = new AtomicBoolean(false);
+
+        GatedRepository(Path directory) {
+            super(directory, LOG);
+        }
+
+        /** 준비가 끝난 뒤에만 멈춘다. 백업을 심는 동안의 read 는 그대로 통과시킨다. */
+        void arm() {
+            gate.set(true);
+        }
+
+        @Override
+        public Optional<BackupEntry> read(Path archive) {
+            Optional<BackupEntry> result = super.read(archive);
+            if (gate.compareAndSet(true, false)) {
+                firstRead = result.orElse(null);
+                scanning.countDown();
+                try {
+                    released.await(5, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return result;
+        }
     }
 
     // ------------------------------------------------------------------

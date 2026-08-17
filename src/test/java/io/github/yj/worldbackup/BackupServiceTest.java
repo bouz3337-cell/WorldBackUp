@@ -232,6 +232,134 @@ class BackupServiceTest {
     }
 
     // ------------------------------------------------------------------
+    // 용량 측정 순회를 건너뛰는 경로
+
+    /**
+     * 공간이 넉넉하면 차등 백업은 용량 측정 순회를 건너뛴다. 그래도 <b>담기는 내용은 같아야 한다.</b>
+     *
+     * <p>그 순회는 디스크 판정과 진행률 분모를 위해서만 있는데, 트리를 통째로 한 번 더 돈다.
+     * 건너뛰는 것이 결과에 영향을 주면 안 된다.</p>
+     */
+    @Test
+    void differentialSkipsTheMeasureWalkWhenSpaceIsAmpleButStoresTheSameFiles() throws Exception {
+        configure(cfg -> {
+            cfg.set("backup.mode", "differential");
+            cfg.set("retention.min-free-disk-gb", 0); // 공간은 넉넉하다
+        });
+
+        BackupEntry full = new BackupService(server).runBlocking(BackupType.MANUAL, "전체", null);
+        assertFalse(full.isDifferential(), "첫 백업은 전체여야 한다");
+        assertTrue(full.originalBytes() > 0, "건너뛸 판단의 근거가 되는 값이다");
+
+        Thread.sleep(1100); // 수정 시각이 초 단위로 갈리도록
+        Files.writeString(serverRoot.resolve("world/region/r.0.0.mca"), "바뀐 지형", StandardCharsets.UTF_8);
+
+        BackupEntry diff = new BackupService(server).runBlocking(BackupType.MANUAL, "차등", null);
+
+        assertTrue(diff.isDifferential(), "기준을 둔 차등 백업이어야 한다");
+        assertEquals(full.id(), diff.baseId());
+        assertEquals(full.fileCount(), diff.fileCount(), "스냅샷 파일 수는 그대로다");
+
+        // 바뀐 파일만 담기고, 나머지는 기준에서 재사용된다.
+        assertEquals(List.of("world/region/r.0.0.mca"), storedNames(diff),
+                "측정을 건너뛰어도 담는 파일 판정은 그대로여야 한다");
+    }
+
+    /**
+     * 공간이 모자라면 건너뛰지 않고 예전처럼 정확히 재고 거부한다.
+     *
+     * <p>건너뛰기 판단이 잘못 참을 내면 디스크가 꽉 찬 서버에서 백업이 공간 확보도 없이
+     * 진행되다 실패한다. 차등 백업에서도 그 브레이크가 살아 있는지 확인한다.</p>
+     */
+    @Test
+    void differentialStillEnforcesTheDiskCheckWhenSpaceIsTight() throws Exception {
+        configure(cfg -> cfg.set("backup.mode", "differential"));
+        BackupEntry full = new BackupService(server).runBlocking(BackupType.MANUAL, "전체", null);
+        assertFalse(full.isDifferential());
+
+        // 이제 여유 공간 요구를 터무니없이 올린다. 건너뛸 수 없어야 한다.
+        configure(cfg -> {
+            cfg.set("backup.mode", "differential");
+            cfg.set("retention.min-free-disk-gb", 999_999L);
+            cfg.set("retention.min-backups", 0);
+        });
+        server.hold = true; // 공간을 만들지 않고 즉시 실패하는 경로
+
+        Exception error = assertThrows(Exception.class,
+                () -> new BackupService(server).runBlocking(BackupType.MANUAL, null, null));
+        assertTrue(String.valueOf(error.getMessage()).contains("디스크 여유 공간이 부족"),
+                "디스크 판정이 살아 있어야 한다: " + error.getMessage());
+        assertTrue(archiveIds().contains(full.id()), "정지 중에는 옛 백업을 지우지 않는다");
+    }
+
+    /** 기준 백업에 스냅샷 크기 기록이 없으면(옛 백업) 건너뛰지 않고 재야 한다. */
+    @Test
+    void aBaseWithoutASnapshotSizeFallsBackToMeasuring() throws Exception {
+        configure(cfg -> cfg.set("backup.mode", "differential"));
+        BackupEntry full = new BackupService(server).runBlocking(BackupType.MANUAL, "전체", null);
+
+        // original-bytes 를 0 으로 지워 옛 백업을 흉내 낸다.
+        server.repository.writeMeta(new BackupEntry(full.id(), full.archive(), full.createdAt(),
+                full.type(), full.label(), full.archiveBytes(), 0L, full.fileCount(),
+                full.roots(), full.worlds(), full.excludes(), full.serverVersion(),
+                full.locked(), true, full.baseId(), full.playerData()));
+
+        Thread.sleep(1100);
+        Files.writeString(serverRoot.resolve("world/level.dat"), "level-2", StandardCharsets.UTF_8);
+
+        BackupEntry diff = new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
+        assertTrue(diff.isDifferential(), "재는 경로로 돌아가도 차등 백업은 정상 동작한다");
+        assertEquals(List.of("world/level.dat"), storedNames(diff));
+    }
+
+    /**
+     * 측정을 건너뛸지 정하는 규칙 자체.
+     *
+     * <p>이 판단이 <b>잘못 참을 내면</b> 디스크가 빠듯한 서버에서 공간 확보도 없이 백업을
+     * 시작해 실패한다. 그래서 경계에서 확실히 보수적인지 못 박는다. 반대로 거짓을 내는 것은
+     * 조금 느려질 뿐이라 안전한 방향이다.</p>
+     */
+    @Test
+    void theSkipDecisionIsConservativeAtTheBoundary() {
+        long gb = 1024L * 1024 * 1024;
+
+        // 10GB 스냅샷 · 무압축 가정 → 최악 15GB. 여유 20GB 면 건너뛴다.
+        assertTrue(BackupService.hasAmpleRoom(10 * gb, 1.0, 0L, 20 * gb));
+        // 14GB 밖에 없으면 1.5배 여유를 못 채운다 → 재야 한다.
+        assertFalse(BackupService.hasAmpleRoom(10 * gb, 1.0, 0L, 14 * gb));
+        // 스냅샷만큼(10GB)만 남아도 건너뛰지 않는다 - 자란 만큼을 감당하지 못한다.
+        assertFalse(BackupService.hasAmpleRoom(10 * gb, 1.0, 0L, 10 * gb));
+
+        // min-free-disk-gb 는 최악의 경우 <b>위에</b> 더해서 지켜야 한다.
+        assertTrue(BackupService.hasAmpleRoom(10 * gb, 1.0, 5 * gb, 20 * gb));
+        assertFalse(BackupService.hasAmpleRoom(10 * gb, 1.0, 5 * gb, 19 * gb));
+
+        // 압축을 감안하면 요구가 줄어든다.
+        assertTrue(BackupService.hasAmpleRoom(10 * gb, 0.6, 0L, 10 * gb));
+
+        // 기록이 없는 옛 백업은 절대 건너뛰지 않는다.
+        assertFalse(BackupService.hasAmpleRoom(0L, 1.0, 0L, Long.MAX_VALUE));
+        assertFalse(BackupService.hasAmpleRoom(-1L, 1.0, 0L, Long.MAX_VALUE));
+
+        // 설정이 터무니없이 커서 넘치면 재는 쪽으로 되돌아간다.
+        assertFalse(BackupService.hasAmpleRoom(10 * gb, 1.0, Long.MAX_VALUE, Long.MAX_VALUE));
+    }
+
+    /** 이 아카이브가 <b>직접</b> 담고 있는 데이터 파일 이름들. */
+    private List<String> storedNames(BackupEntry entry) throws IOException {
+        try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(entry.archive().toFile(),
+                StandardCharsets.UTF_8)) {
+            return zip.stream()
+                    .map(java.util.zip.ZipEntry::getName)
+                    .filter(name -> !name.endsWith("/"))
+                    .filter(name -> !name.equals("worldbackup-meta.yml"))
+                    .filter(name -> !name.equals("worldbackup-files.txt"))
+                    .sorted()
+                    .toList();
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 무인 서버에서 백업이 무기한 비지 않는가
 
     /**

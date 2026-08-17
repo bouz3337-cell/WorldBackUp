@@ -100,6 +100,7 @@ public final class WorldBackUpCommand {
                         // Brigadier 의 word() 는 콜론과 공백을 받지 못한다. "03:00" 이나
                         // "2026-08-16 03:00" 은 인자 파싱 단계에서 거부되므로 별도 통로를 둔다.
                         .then(Commands.literal("at")
+                                .executes(ctx -> run(ctx, this::needTimeArgument))
                                 .then(Commands.argument("시각", StringArgumentType.greedyString())
                                         .executes(ctx -> run(ctx, sender -> restoreAt(ctx, sender)))))
                         .then(Commands.argument("백업", StringArgumentType.word())
@@ -117,6 +118,7 @@ public final class WorldBackUpCommand {
 
                 .then(Commands.literal("delete")
                         .requires(source -> has(source.getSender(), "worldbackup.delete"))
+                        .executes(ctx -> run(ctx, sender -> needBackupArgument(sender, "delete")))
                         .then(Commands.argument("백업", StringArgumentType.word())
                                 .suggests(backupSuggestions())
                                 .executes(ctx -> run(ctx, sender -> delete(ctx, sender, false)))
@@ -142,11 +144,36 @@ public final class WorldBackUpCommand {
                                                                      BackupAction action) {
         return Commands.literal(name)
                 .requires(source -> has(source.getSender(), permission))
+                // 인자를 빼먹었을 때 Brigadier 의 기계적인 오류 대신 무엇을 넣어야 하는지 알려 준다.
+                .executes(ctx -> run(ctx, sender -> needBackupArgument(sender, name)))
                 .then(Commands.argument("백업", StringArgumentType.word())
                         .suggests(backupSuggestions())
                         .executes(ctx -> run(ctx, sender ->
                                 resolve(sender, StringArgumentType.getString(ctx, "백업"))
                                         .ifPresent(entry -> action.accept(sender, entry)))));
+    }
+
+    /**
+     * 어떤 백업을 가리키는지 말하지 않았을 때.
+     *
+     * <p>Brigadier 는 이럴 때 커서 위치를 가리키는 영어 오류를 내놓는다. 급한 상황에서
+     * 그것만 보고 다음에 무엇을 쳐야 할지 알 수는 없으므로, 고르는 방법을 그대로 보여 준다.</p>
+     */
+    private void needBackupArgument(CommandSender sender, String name) {
+        Msg.send(sender, "<red>어떤 백업인지 알려 주세요: <white>/wb " + name + " [ID|#번호]</white></red>");
+        Msg.send(sender, "<gray><white>latest</white>(가장 최근) · <white>9h</white>(9시간 전) · "
+                + "<white>03:00</white>(그 시각) 도 됩니다.</gray>");
+        Msg.sendRaw(sender, "<click:run_command:'/wb list'><dark_gray>» "
+                + "<white>/wb list</white> 로 목록을 봅니다</dark_gray></click>");
+    }
+
+    /** {@code /wb restore at} 만 치고 시각을 빼먹었을 때. */
+    private void needTimeArgument(CommandSender sender) {
+        Msg.send(sender, "<red>되돌릴 시각을 알려 주세요: <white>/wb restore at [시각]</white></red>");
+        Msg.send(sender, "<gray>예) <white>03:00</white>, <white>2026-08-16 03:00</white>, "
+                + "<white>9h</white></gray>");
+        Msg.sendRaw(sender, "<click:run_command:'/wb restore'><dark_gray>» "
+                + "<white>/wb restore</white> 로 시점을 골라서 되돌립니다</dark_gray></click>");
     }
 
     @FunctionalInterface

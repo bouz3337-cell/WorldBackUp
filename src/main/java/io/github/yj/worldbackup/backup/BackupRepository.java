@@ -25,6 +25,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Stream;
@@ -56,8 +57,21 @@ public class BackupRepository {
     /** {@link #list()} 캐시 유효 시간. 짧게 잡아 밖에서 폴더를 건드려도 금방 따라잡는다. */
     private static final long LIST_CACHE_MILLIS = 3_000L;
 
-    private volatile List<BackupEntry> cachedList;
-    private volatile long cachedAt;
+    /**
+     * 저장소를 거친 변경이 일어날 때마다 올라가는 번호.
+     *
+     * <p>훑는 데는 시간이 걸리고 그 사이에 다른 스레드가 저장소를 바꿀 수 있다. 번호를
+     * 스캔 <b>전후로</b> 견주어, 달라졌으면 그 결과를 캐시에 넣지 않는다. {@link #invalidate()}
+     * 가 캐시를 비우는 것만으로는 부족하다 - 이미 돌고 있던 스캔이 뒤늦게 <b>변경 이전의</b>
+     * 목록을 캐시에 써 넣으면, 그 옛 목록이 캐시 유효 시간 내내 통용된다.</p>
+     */
+    private final AtomicLong generation = new AtomicLong();
+
+    /** @param generation 이 목록을 만들어 낸 스캔이 시작될 때의 {@link #generation} */
+    private record Cached(List<BackupEntry> entries, long generation, long at) {
+    }
+
+    private volatile Cached cached;
 
     public BackupRepository(Path directory, Logger log) {
         this.directory = directory;
@@ -96,19 +110,27 @@ public class BackupRepository {
      * 뒤처질 수 있는 것은 플러그인 밖에서 백업 폴더를 직접 건드린 경우뿐이다.</p>
      */
     public List<BackupEntry> list() {
-        List<BackupEntry> cached = cachedList;
-        if (cached != null && System.currentTimeMillis() - cachedAt < LIST_CACHE_MILLIS) {
-            return cached;
+        long startedAt = generation.get();
+        Cached snapshot = cached;
+        if (snapshot != null && snapshot.generation() == startedAt
+                && System.currentTimeMillis() - snapshot.at() < LIST_CACHE_MILLIS) {
+            return snapshot.entries();
         }
+
         List<BackupEntry> fresh = List.copyOf(scan());
-        cachedList = fresh;
-        cachedAt = System.currentTimeMillis();
+        // 훑는 동안 저장소가 바뀌었으면 캐시에 넣지 않는다. 이 목록은 이미 옛것이고,
+        // 캐시에 앉히면 그 옛 상태가 유효 시간 내내 정답인 척한다. 부르는 쪽에는 그대로
+        // 돌려준다 - 지금 할 수 있는 최선이고, 다음 호출이 곧 다시 훑는다.
+        if (generation.get() == startedAt) {
+            cached = new Cached(fresh, startedAt, System.currentTimeMillis());
+        }
         return fresh;
     }
 
     /** 저장소를 거친 변경 뒤에는 반드시 호출한다. */
     private void invalidate() {
-        cachedList = null;
+        generation.incrementAndGet();
+        cached = null;
     }
 
     private List<BackupEntry> scan() {
@@ -515,7 +537,18 @@ public class BackupRepository {
                 if (entry.protectedFrom(settings.protectManual())) autoProtected.add(entry);
             }
             for (int i = autoProtected.size() - 1; i >= settings.maxProtected(); i--) {
-                toDelete.add(autoProtected.get(i));
+                BackupEntry entry = autoProtected.get(i);
+                // 보관 정책이 남기기로 한 자리는 상한보다 우선한다. 계단(또는 keep-daily)은
+                // "이 시간대에 되돌릴 지점이 하나 있다" 는 약속인데, 그 자리를 채운 백업이
+                // 하필 수동 백업이면 상한이 오래된 순으로 지우면서 그 시간대를 통째로 비웠다.
+                // 그런데 /wb status 는 그동안 계속 "계단식 N단계" 를 보여 주므로, 비었다는
+                // 사실은 정작 되돌려야 하는 날에야 드러난다.
+                //
+                // 세는 것은 <b>전부</b> 센다. 여기서 빼 버리면 상한이 "계단 밖 보호 백업의
+                // 개수" 라는 다른 뜻이 되어, 계단 안에 보호 백업이 있을 때 상한을 넘겨도
+                // 아무것도 지우지 않게 된다. 계단 밖은 그대로 걸리므로 무한정 쌓이지 않는다.
+                if (keep.contains(entry.id())) continue;
+                toDelete.add(entry);
             }
         }
 
@@ -730,6 +763,20 @@ public class BackupRepository {
     }
 
     /**
+     * 아직 지우지 않은 차등 백업이 이 기준을 붙잡고 있는지.
+     *
+     * <p>{@code all} 은 훑기 시작할 때의 목록이라, 이번 회차에 이미 지운 것을 빼고 봐야 한다.
+     * {@link #dependents} 를 쓰면 그 판단을 못 해서 기준이 영원히 남는다.</p>
+     */
+    private static boolean hasSurvivingDependent(List<BackupEntry> all, BackupEntry base, Set<String> deleted) {
+        if (base.isDifferential()) return false; // 차등본은 기준이 될 수 없다
+        for (BackupEntry other : all) {
+            if (base.id().equals(other.baseId()) && !deleted.contains(other.id())) return true;
+        }
+        return false;
+    }
+
+    /**
      * 필요한 공간을 확보하기 위해 오래된(보호되지 않은) 백업부터 삭제한다.
      *
      * <p>{@code min-backups} 는 <b>여기서도</b> 지킨다. 예전에는 "최소 1개" 만 남겼는데, 그러면
@@ -754,24 +801,37 @@ public class BackupRepository {
         int remaining = all.size();
         int floor = Math.max(1, settings.minBackups());
 
+        Set<String> deleted = new HashSet<>();
         long freed = 0L;
-        for (int i = all.size() - 1; i >= 0 && freed < neededBytes; i--) {
-            BackupEntry entry = all.get(i);
-            if (isPinned(entry)) continue; // 진행 중인 차등 백업의 기준
-            if (entry.protectedFrom(settings.protectManual())) continue;
-            if (!entry.isDifferential() && !dependents(all, entry.id()).isEmpty()) continue;
-            // 손상된 백업은 하한선에 세지 않으므로 이 뒤로도 계속 지울 수 있다. break 가 아니다.
-            if (entry.complete() && surviving <= floor) continue;
-            // 다만 마지막 하나는 손상 여부와 무관하게 남긴다. "손상" 판정에는 "사이드카와 zip
-            // 메타를 둘 다 못 읽었다" 도 포함되어서, 일시적인 I/O 오류로 멀쩡한 백업이 그렇게
-            // 잡힐 수 있다. 그 판정 하나를 믿고 백업 폴더를 비우는 것은 너무 나간 것이다.
-            if (remaining <= 1) continue;
-            long size = entry.archiveBytes();
-            if (delete(entry)) {
-                freed += size;
-                remaining--;
-                if (entry.complete()) surviving--;
-                log.warning("[백업] 디스크 공간 확보를 위해 오래된 백업을 삭제했습니다: " + entry.id());
+
+        // 한 번만 훑으면 상한을 크게 못 맞춘다. 기준 백업은 대개 딸린 차등본보다 오래되어
+        // 먼저 만나는데, 그때는 차등본이 아직 살아 있어 건너뛴다. 그 뒤에 차등본이 지워져도
+        // 기준을 다시 볼 기회가 없다. 정작 기준이 가장 큰 파일인 경우가 많다.
+        // enforceTotalSize 가 같은 이유로 그렇게 하듯, 변화가 없을 때까지 돈다.
+        boolean deletedAny = true;
+        while (deletedAny && freed < neededBytes) {
+            deletedAny = false;
+            for (int i = all.size() - 1; i >= 0 && freed < neededBytes; i--) {
+                BackupEntry entry = all.get(i);
+                if (deleted.contains(entry.id())) continue;
+                if (isPinned(entry)) continue; // 진행 중인 차등 백업의 기준
+                if (entry.protectedFrom(settings.protectManual())) continue;
+                if (hasSurvivingDependent(all, entry, deleted)) continue;
+                // 손상된 백업은 하한선에 세지 않으므로 이 뒤로도 계속 지울 수 있다. break 가 아니다.
+                if (entry.complete() && surviving <= floor) continue;
+                // 다만 마지막 하나는 손상 여부와 무관하게 남긴다. "손상" 판정에는 "사이드카와 zip
+                // 메타를 둘 다 못 읽었다" 도 포함되어서, 일시적인 I/O 오류로 멀쩡한 백업이 그렇게
+                // 잡힐 수 있다. 그 판정 하나를 믿고 백업 폴더를 비우는 것은 너무 나간 것이다.
+                if (remaining <= 1) continue;
+                long size = entry.archiveBytes();
+                if (delete(entry)) {
+                    deleted.add(entry.id());
+                    freed += size;
+                    remaining--;
+                    if (entry.complete()) surviving--;
+                    deletedAny = true;
+                    log.warning("[백업] 디스크 공간 확보를 위해 오래된 백업을 삭제했습니다: " + entry.id());
+                }
             }
         }
         if (freed < neededBytes && !all.isEmpty()) {

@@ -8,6 +8,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -40,6 +41,15 @@ public final class Manifest {
     public record Stamp(long size, long modified) {
     }
 
+    /**
+     * 목록에는 올랐지만 이 아카이브가 <b>바이트를 담지 못한</b> 파일의 크기 자리표.
+     *
+     * <p>실제 파일 크기는 음수가 될 수 없으므로 {@link #unchanged} 가 이 값과 맞아떨어지는 일은
+     * 없다. 즉 다음 차등 백업은 이 파일을 반드시 새로 담는다. 이 목록을 읽는 옛 버전도 같은
+     * 이유로 안전하게 동작한다.</p>
+     */
+    private static final long NOT_STORED = -1L;
+
     private final Map<String, Stamp> files;
 
     public Manifest(Map<String, Stamp> files) {
@@ -50,16 +60,48 @@ public final class Manifest {
         return new Manifest(new LinkedHashMap<>());
     }
 
+    /** 백업 시점에 <b>존재했던</b> 모든 파일. 담지 못한 파일도 들어 있다. */
     public Set<String> paths() {
         return Collections.unmodifiableSet(files.keySet());
+    }
+
+    /**
+     * 이 아카이브에서 <b>내용을 꺼낼 수 있는</b> 파일들.
+     *
+     * <p>차등 백업이면 여기에는 "기준에서 재사용한 파일" 도 들어 있다. 이 아카이브가 직접
+     * 갖고 있다는 뜻이 아니라, 기준까지 함께 풀면 온전한 내용을 얻는다는 뜻이다.</p>
+     */
+    public Set<String> storedPaths() {
+        Set<String> stored = new LinkedHashSet<>();
+        for (Map.Entry<String, Stamp> entry : files.entrySet()) {
+            if (entry.getValue().size() != NOT_STORED) stored.add(entry.getKey());
+        }
+        return stored;
     }
 
     public boolean contains(String path) {
         return files.containsKey(path);
     }
 
+    /** 이 파일의 온전한 내용을 이 백업으로 되돌릴 수 있는지. */
+    public boolean stored(String path) {
+        Stamp stamp = files.get(path);
+        return stamp != null && stamp.size() != NOT_STORED;
+    }
+
     public void put(String path, long size, long modified) {
         files.put(path, new Stamp(size, modified));
+    }
+
+    /**
+     * 스냅샷에는 있었지만 담지 못한 파일로 올린다.
+     *
+     * <p>목록에서 아예 빼면 안 된다. 차등 복원이 이 파일을 "기준 이후 삭제됐다" 로 보고
+     * 지나쳐서, 기준 백업에 남아 있는 <b>예전 판까지</b> 잃기 때문이다. 여기 올려 두면
+     * 그 예전 판으로 되돌아간다 - 깨진 파일이나 없는 파일보다 낫다.</p>
+     */
+    public void putUnstored(String path) {
+        files.put(path, new Stamp(NOT_STORED, 0L));
     }
 
     /** 기준 백업 이후 이 파일이 그대로인지. 모르는 경로면 "바뀐 것"으로 본다. */

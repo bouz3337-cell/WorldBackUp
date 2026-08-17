@@ -137,13 +137,20 @@ public final class RestoreApplier {
             GlobMatcher preserve = new GlobMatcher(pending.preserve());
             List<String> roots = pending.roots();
 
-            // 차등 백업이면 "이 시점의 전체 파일 목록"이 매니페스트에 들어 있다.
-            // 목록에 있는데 차등 zip 에 없는 파일은 기준 백업에서 꺼내 온다.
-            Manifest manifest = pending.baseArchive() == null
-                    ? null
-                    : Manifest.readFrom(pending.archive()).orElse(null);
+            // 이 아카이브에 무엇이 들었는지는 zip 의 엔트리 목록이 아니라 <b>매니페스트</b>가
+            // 정한다. 매니페스트에는 끝까지 담아낸 파일만 적히기 때문이다.
+            //
+            // zip 엔트리는 한 번 쓰면 되돌릴 수 없어서, 백업 중 파일을 읽다가 I/O 오류로
+            // 끊기면 잘린 엔트리가 아카이브에 남는다. 그걸 그대로 풀면 멀쩡했던 파일이
+            // 깨진 파일로 덮어써진다. (차등 백업이면 이 목록이 "그 시점의 전체 파일" 이기도
+            // 해서, 목록에 있는데 차등 zip 에 없는 파일은 기준 백업에서 꺼내 온다.)
+            Manifest manifest = Manifest.readFrom(pending.archive()).orElse(null);
             if (pending.baseArchive() != null && manifest == null) {
                 throw new IOException("차등 백업에 파일 목록이 없어 복원할 수 없습니다.");
+            }
+
+            if (manifest != null) {
+                warnAboutUnstored(manifest, pending.baseArchive() != null, log);
             }
 
             // 백업이 실제로 데이터를 갖고 있는 경로만 교체 대상으로 남긴다. 내용이 없는 경로를
@@ -190,11 +197,15 @@ public final class RestoreApplier {
             // 기준에서 꺼내는 건 매니페스트에 살아 있는 파일로만 제한한다.
             // (기준 이후 삭제된 파일이 되살아나면 안 된다)
             if (pending.baseArchive() != null) {
-                Set<String> inDiff = dataEntryNames(pending.archive());
+                // 차등 zip 이 <b>온전히</b> 담고 있는 파일만 "여기서 꺼낼 것" 으로 센다.
+                // 잘린 엔트리는 여기서 빠지므로 기준 백업에 있던 예전 판이라도 꺼내 온다.
+                // 깨진 파일보다, 그리고 없는 파일보다 조금 낡은 파일이 낫다.
+                Set<String> fromDiff = new HashSet<>(dataEntryNames(pending.archive()));
+                fromDiff.retainAll(manifest.storedPaths());
                 extract(pending.baseArchive(), serverRoot, roots, preserve, stats, log,
-                        name -> manifest.contains(name) && !inDiff.contains(name));
+                        name -> manifest.contains(name) && !fromDiff.contains(name));
             }
-            extract(pending.archive(), serverRoot, roots, preserve, stats, log, name -> true);
+            extract(pending.archive(), serverRoot, roots, preserve, stats, log, restorable(manifest));
 
         } catch (Throwable t) {
             error = String.valueOf(t.getMessage());
@@ -269,6 +280,56 @@ public final class RestoreApplier {
     // ------------------------------------------------------------------
 
     /**
+     * 이 아카이브에서 꺼내도 되는 엔트리인지 판단하는 조건.
+     *
+     * <p>매니페스트에 적힌 파일만 꺼낸다. 거기에는 끝까지 담아낸 파일만 적히므로, 백업 도중
+     * 읽다가 끊겨 <b>잘린 채로</b> 남은 엔트리가 이 문턱에서 걸린다. 없는 파일과 깨진 파일은
+     * 전혀 다른 결과다 - region 파일이 없으면 그 청크가 재생성되지만, 잘려 있으면
+     * "Corrupt regionfile header" 가 뜨고 그 파일이 담당한 지역이 통째로 어그러진다.
+     * {@code keep-replaced-files} 를 켜 두었다면 원래 파일은 {@code replaced/} 에 남아 있다.</p>
+     *
+     * <p>폴더 엔트리는 그냥 통과시킨다. 매니페스트는 파일만 담으므로 빈 폴더를 되살리는
+     * 유일한 수단이 그 엔트리다. 매니페스트가 아예 없으면 그것을 기록하지 않던 시절의
+     * 백업이므로 예전처럼 전부 꺼낸다.</p>
+     */
+    private static Predicate<String> restorable(Manifest manifest) {
+        if (manifest == null) return name -> true;
+        return name -> name.endsWith("/") || manifest.stored(name);
+    }
+
+    /**
+     * 백업 당시 담지 못한 파일을 알린다.
+     *
+     * <p>{@link #restorable} 이 걸러 주므로 복원이 데이터를 깨뜨리지는 않지만, 그 파일이
+     * 이번 복원으로 <b>어떻게 되는지</b>는 알아야 한다. 조용히 넘어가면 복원이 "완료" 로
+     * 끝나 놓고 정작 그 지역만 비어 있게 된다.</p>
+     */
+    private static void warnAboutUnstored(Manifest manifest, boolean hasBase, Logger log) {
+        Set<String> stored = manifest.storedPaths();
+        List<String> missing = new ArrayList<>();
+        for (String name : manifest.paths()) {
+            if (!stored.contains(name)) missing.add(name);
+        }
+        if (missing.isEmpty()) return;
+
+        missing.sort(null);
+        log.warning("[WorldBackUp] 백업 당시 끝까지 읽지 못한 파일이 " + missing.size()
+                + "개 있습니다. (서버가 그 파일에 쓰고 있었거나 디스크 오류)");
+        log.warning(hasBase
+                ? "[WorldBackUp] 기준 백업에 예전 판이 있으면 그것으로 되돌리고, 없으면 그대로 둡니다."
+                : "[WorldBackUp] 이 파일들은 복원하지 않습니다. 잘린 파일을 풀면 데이터가 깨집니다.");
+        for (String name : missing.subList(0, Math.min(missing.size(), UNSTORED_LOG_LIMIT))) {
+            log.warning("[WorldBackUp]   - " + name);
+        }
+        if (missing.size() > UNSTORED_LOG_LIMIT) {
+            log.warning("[WorldBackUp]   … " + (missing.size() - UNSTORED_LOG_LIMIT) + "개 더");
+        }
+    }
+
+    /** 담지 못한 파일 이름을 콘솔에 몇 개까지 늘어놓을지. */
+    private static final int UNSTORED_LOG_LIMIT = 20;
+
+    /**
      * 백업이 실제로 데이터를 갖고 있는 root 만 골라낸다.
      *
      * <p>zip 의 중앙 디렉터리만 읽으므로 {@link #verify} 와 달리 거의 비용이 없다.
@@ -280,8 +341,10 @@ public final class RestoreApplier {
      */
     private static List<String> coveredRoots(Path archive, Manifest manifest,
                                              List<String> roots, Logger log) throws IOException {
-        // 차등 백업이면 매니페스트가 그 시점의 정답이고, 전체 백업이면 zip 에 든 파일 그대로다.
-        Set<String> files = manifest != null ? manifest.paths() : dataEntryNames(archive);
+        // 매니페스트가 있으면 그것이 정답이다. 다만 <b>담아낸</b> 파일만 센다 - 백업 당시
+        // 읽지 못한 파일은 여기서 복원해 줄 수 없으므로, 그것만 든 경로를 "데이터가 있다"고
+        // 보고 비워 버리면 되돌리지도 못한 채 지우기만 하게 된다.
+        Set<String> files = manifest != null ? manifest.storedPaths() : dataEntryNames(archive);
 
         // root 마다 전체 파일 목록을 다시 훑으면 (파일 수 × root 수) 가 된다. 50만 파일짜리
         // 월드에 root 가 열몇 개면 그것만으로 수백만 번이다. 한 번만 훑으면서 어느 root 가
@@ -329,8 +392,14 @@ public final class RestoreApplier {
             available.addAll(readAndCheck(baseArchive, log));
         }
 
-        // 복원될 최종 파일 목록. 차등 백업이면 매니페스트, 아니면 아카이브에 든 파일 그대로다.
-        Set<String> finalFiles = manifest == null ? available : manifest.paths();
+        // 복원될 최종 파일 목록. 매니페스트가 있으면 그것이 정답이고, 없으면(옛 백업)
+        // 아카이브에 든 파일 그대로다.
+        //
+        // 백업 당시 담지 못한 파일은 <b>여기서 빼야 한다.</b> 그것까지 요구하면 읽지 못한
+        // 파일 하나 때문에 복원 전체가 거부된다 - 그 파일을 잃는 것과 백업 전체를 못 쓰는
+        // 것은 전혀 다른 크기의 손해다. 아래 교차 검사가 노리는 것은 "짝이 맞지 않는 기준
+        // 백업" 인데, 그 판단은 담아낸 파일만으로도 그대로 성립한다.
+        Set<String> finalFiles = manifest == null ? available : manifest.storedPaths();
         if (finalFiles.isEmpty()) {
             throw new IOException("백업 파일에 복원할 내용이 없습니다.");
         }
@@ -427,6 +496,34 @@ public final class RestoreApplier {
                                        Stats stats,
                                        Logger log) throws IOException {
         Files.walkFileTree(directory, new SimpleFileVisitor<>() {
+
+            /**
+             * 통째로 보존할 폴더는 들어가지 않는다. {@link io.github.yj.worldbackup.backup.Archiver}
+             * 가 백업에서 제외 폴더를 건너뛰는 것과 같은 규칙이다.
+             *
+             * <p>두 가지가 달라진다.</p>
+             * <ul>
+             *   <li>보존 대상인 <b>빈 폴더가 살아남는다.</b> 아래 {@code postVisitDirectory} 는
+             *       빈 폴더를 지우는데, 파일 단위로만 검사하면 "그대로 둘 것" 으로 지정한 폴더가
+             *       비어 있다는 이유로 사라졌다.</li>
+             *   <li>{@code preserve} 에는 백업에서 제외했던 패턴이 함께 들어오고, 거기에는
+             *       플러그인 자기 폴더가 있다. 그 안에는 옛 월드를 통째로 담아 둔
+             *       {@code replaced/} 가 최대 몇 벌씩 들어 있다. 복원 대상 경로가 그 폴더를
+             *       품고 있으면({@code extra-paths: ["plugins"]} 같은 설정) 지금까지는 그
+             *       수십만 개를 한 파일씩 훑어 보고 넘겼다. 여기서 끊으면 그 비용이 사라지고
+             *       {@code preserved} 집계도 뜻을 되찾는다.</li>
+             * </ul>
+             */
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                String relative = FileUtil.relativize(serverRoot, dir);
+                if (relative != null && preserve.matchesDirectory(relative)) {
+                    stats.preserved++;
+                    return FileVisitResult.SKIP_SUBTREE;
+                }
+                return FileVisitResult.CONTINUE;
+            }
+
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
                 removeFile(file, serverRoot, preserve, replacedDir, stats, log);

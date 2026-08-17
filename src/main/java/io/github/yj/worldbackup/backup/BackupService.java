@@ -346,15 +346,27 @@ public final class BackupService {
             // 진행률은 스냅샷 전체 기준이지만, 디스크 여유는 "이번에 실제로 쓸 양" 으로 봐야 한다.
             // 차등 백업에 전체 크기를 들이대면 200MB 를 쓰면서 10GB 를 요구하게 되고,
             // ensureDiskSpace 가 그 공간을 만들겠다며 멀쩡한 백업을 지운 뒤 결국 실패한다.
-            FileUtil.ChangeFilter changed = baseFiles == null ? null
-                    : (relative, size, modified) -> !baseFiles.unchanged(relative, size, modified);
+            //
+            // 이 훑기는 트리를 통째로 한 번 더 돈다 - 파일마다 stat 을 하므로 캐시가 식어 있으면
+            // 압축만큼 걸릴 수도 있다. 그런데 공간이 넉넉하다는 것을 이미 알 수 있다면 이 훑기의
+            // 두 결과(디스크 판정·진행률 분모) 모두 필요하지 않다. 기준 백업의 스냅샷 크기가
+            // 그 답을 들고 있다.
+            long expectedBytes;
+            if (base != null && hasAmpleRoom(settings, repo, base)) {
+                // 분모는 기준 백업의 스냅샷 크기로 어림잡는다. 진행률은 99%에서 멈추도록
+                // 되어 있으므로 조금 틀려도 문제가 없다.
+                expectedBytes = base.originalBytes();
+            } else {
+                FileUtil.ChangeFilter changed = baseFiles == null ? null
+                        : (relative, size, modified) -> !baseFiles.unchanged(relative, size, modified);
 
-            FileUtil.Sizes sizes = FileUtil.Sizes.ZERO;
-            for (Path target : targets) {
-                sizes = sizes.plus(FileUtil.measure(target, serverRoot, settings.exclude(), changed));
+                FileUtil.Sizes sizes = FileUtil.Sizes.ZERO;
+                for (Path target : targets) {
+                    sizes = sizes.plus(FileUtil.measure(target, serverRoot, settings.exclude(), changed));
+                }
+                expectedBytes = sizes.totalBytes();
+                ensureDiskSpace(settings, repo, sizes.changedBytes());
             }
-            long expectedBytes = sizes.totalBytes();
-            ensureDiskSpace(settings, repo, sizes.changedBytes());
 
             // 4) 압축
             final List<String> finalWorlds = List.copyOf(worldNames);
@@ -418,6 +430,12 @@ public final class BackupService {
                 server.logger().info("[백업] 차등 백업 (기준 " + base.id() + ") - 저장 "
                         + result.storedCount() + "개 " + FileUtil.humanBytes(result.storedBytes())
                         + " / 재사용 " + reused + "개");
+            }
+            if (result.plainBytes() > 0) {
+                // region 파일처럼 이미 압축된 것을 다시 누르지 않았다는 뜻이다. 압축 레벨을
+                // 올려도 백업이 더 작아지지 않는 이유가 여기 있으므로 눈에 보이게 남긴다.
+                server.logger().info("[백업] 이미 압축된 파일 "
+                        + FileUtil.humanBytes(result.plainBytes()) + " 는 재압축하지 않았습니다.");
             }
             if (result.skippedCount() > 0) {
                 server.logger().warning("[백업] 읽지 못해 건너뛴 파일 " + result.skippedCount() + "개");
@@ -590,6 +608,48 @@ public final class BackupService {
                 world.autoSave(saved.getValue());
             }
         }
+    }
+
+    /**
+     * 월드가 이만큼 커져 있을 수도 있다고 보고 잡는 여유. 측정을 건너뛸지 판단할 때만 쓴다.
+     *
+     * <p>기준 백업 이후 월드가 자랐을 수 있으므로 그 크기를 그대로 믿지 않는다. 절반이 더
+     * 붙었다고 봐도 공간이 남는다면, 이번 백업이 공간 때문에 실패할 길은 없다.</p>
+     */
+    private static final double SNAPSHOT_GROWTH_MARGIN = 1.5;
+
+    /**
+     * 대상을 훑어 보지 <b>않고도</b> 공간이 넉넉하다고 단정할 수 있는지.
+     *
+     * <p>차등 백업이 쓰는 양은 아무리 많아도 스냅샷 전체를 넘지 못한다. 그 상한을 기준 백업의
+     * {@code original-bytes} 에서 가져와, 넉넉히 잡은 최악의 경우에도 여유가 남으면 참을 돌려준다.
+     * 그러면 호출자는 용량 측정 순회를 통째로 건너뛴다.</p>
+     *
+     * <p>거짓을 돌려주면 예전처럼 정확히 재고 필요하면 공간을 만든다. 즉 이 판단이 보수적으로
+     * 틀리는 방향은 "조금 느려질 뿐" 이다. 반대로 참을 돌려주려면 실제로 여유가 있어야 하므로
+     * 상한을 크게 잡는다.</p>
+     */
+    private boolean hasAmpleRoom(BackupSettings settings, BackupRepository repo, BackupEntry base) {
+        return hasAmpleRoom(base.originalBytes(), compressionFactor(settings),
+                settings.minFreeDiskBytes(), FileUtil.usableSpace(repo.directory()));
+    }
+
+    /**
+     * 위 판단의 규칙만 떼어 낸 것. 디스크를 만지지 않으므로 경계를 그대로 검증할 수 있다.
+     *
+     * <p>{@code public} 인 이유는 하나뿐이다 - 이 규칙이 <b>잘못 참을 내면</b> 디스크가 빠듯한
+     * 서버가 공간 확보도 없이 백업을 시작해 실패하므로, 경계를 테스트로 못 박아 두어야 한다.</p>
+     *
+     * @param snapshotBytes 기준 백업의 스냅샷 크기. 0 이하면 기록이 없는 옛 백업이다.
+     */
+    public static boolean hasAmpleRoom(long snapshotBytes, double compressionFactor,
+                                       long minFreeBytes, long usableBytes) {
+        if (snapshotBytes <= 0) return false; // 옛 백업이라 기록이 없다 - 재는 수밖에 없다
+
+        long worstCase = (long) (snapshotBytes * SNAPSHOT_GROWTH_MARGIN * compressionFactor);
+        long required = worstCase + minFreeBytes;
+        if (required < 0) return false; // 설정이 터무니없이 커서 넘쳤다 - 정확히 재게 한다
+        return usableBytes >= required;
     }
 
     /** @param plannedBytes 이번 아카이브에 실제로 저장할 원본 바이트 (차등 백업이면 바뀐 파일만) */

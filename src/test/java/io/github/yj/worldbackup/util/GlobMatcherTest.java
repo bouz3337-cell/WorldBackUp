@@ -85,6 +85,108 @@ class GlobMatcherTest {
         assertFalse(matcher.matchesFile("session.lock.bak"));
     }
 
+    /**
+     * {@code **}{@code /X} 는 마지막 조각만 검사하도록 최적화된다. 그 지름길이 답을 바꾸면 안 된다.
+     */
+    @Test
+    void lastSegmentShortcutKeepsTheSameAnswers() {
+        GlobMatcher matcher = new GlobMatcher(List.of("**/*.log"));
+
+        assertTrue(matcher.matchesFile("latest.log"), "최상위");
+        assertTrue(matcher.matchesFile("logs/latest.log"));
+        assertTrue(matcher.matchesFile("world/a/b/c/latest.log"), "아무 깊이");
+        assertFalse(matcher.matchesFile("latest.log/inner.dat"), "폴더 이름이 맞은 것은 파일이 아니다");
+        assertFalse(matcher.matchesFile("world/latest.logx"));
+        assertFalse(matcher.matchesFile("world/log"));
+    }
+
+    /**
+     * {@code **} 가 꼬리에 들어 있으면 마지막 조각 지름길을 쓸 수 없다.
+     *
+     * <p>{@code **} 는 {@code /} 를 넘어가므로 {@code a**b} 는 {@code adir/subb} 에도 맞는다.
+     * 지름길로 처리하면 그 경로를 놓친다.</p>
+     */
+    @Test
+    void doubleStarInsideTheTailStillCrossesDirectories() {
+        GlobMatcher matcher = new GlobMatcher(List.of("**/a**b"));
+
+        assertTrue(matcher.matchesFile("ab"));
+        assertTrue(matcher.matchesFile("world/axxb"));
+        assertTrue(matcher.matchesFile("world/adir/subb"), "** 는 경로 구분자를 넘는다");
+        assertFalse(matcher.matchesFile("world/xb"));
+    }
+
+    /** 마지막 조각 패턴과 경로 전체 패턴을 섞어도 서로 침범하지 않아야 한다. */
+    @Test
+    void lastSegmentAndFullPathPatternsCoexist() {
+        GlobMatcher matcher = new GlobMatcher(List.of(
+                "**/*.lock",              // 마지막 조각만
+                "**/logs/**",             // 경로 전체
+                "plugins/WorldBackUp",    // 경로 전체 (위치 고정)
+                "plugins/WorldBackUp/**"));
+
+        assertTrue(matcher.matchesFile("world/session.lock"));
+        assertTrue(matcher.matchesFile("world/logs/latest.txt"));
+        assertTrue(matcher.matchesDirectory("world/logs"));
+        assertTrue(matcher.matchesDirectory("plugins/WorldBackUp"));
+        assertTrue(matcher.matchesFile("plugins/WorldBackUp/backups/wb-1.zip"));
+
+        assertFalse(matcher.matchesFile("world/region/r.0.0.mca"));
+        assertFalse(matcher.matchesFile("plugins/OtherPlugin/config.yml"));
+        assertFalse(matcher.matchesDirectory("world/region"));
+        assertFalse(matcher.matchesFile("logsfile.txt"), "폴더 이름 일부가 맞은 것은 아니다");
+    }
+
+    /** 폴더 자체를 가리키는 {@code **}{@code /이름} 패턴도 지름길에서 살아야 한다. */
+    @Test
+    void lastSegmentPatternAlsoMatchesDirectories() {
+        GlobMatcher matcher = new GlobMatcher(List.of("**/cache"));
+
+        assertTrue(matcher.matchesDirectory("world/cache"));
+        assertTrue(matcher.matchesDirectory("cache"));
+        assertFalse(matcher.matchesDirectory("world/cached"));
+    }
+
+    /**
+     * {@code **}{@code /D/**} 는 조각 훑기로 처리된다. 정규식과 같은 답을 내야 한다.
+     */
+    @Test
+    void enclosingDirectoryShortcutKeepsTheSameAnswers() {
+        GlobMatcher matcher = new GlobMatcher(List.of("**/logs/**"));
+
+        assertTrue(matcher.matchesFile("logs/latest.log"), "최상위");
+        assertTrue(matcher.matchesFile("world/logs/latest.log"));
+        assertTrue(matcher.matchesFile("a/b/logs/c/d/e.txt"), "아무 깊이, 아래로도 아무 깊이");
+        assertTrue(matcher.matchesDirectory("world/logs"), "폴더 자체");
+        assertTrue(matcher.matchesDirectory("logs"));
+
+        assertFalse(matcher.matchesFile("logs"), "폴더 이름만으로는 파일이 아니다");
+        assertFalse(matcher.matchesFile("world/logs.txt"));
+        assertFalse(matcher.matchesFile("world/mylogs/a.txt"), "조각이 정확히 같아야 한다");
+        assertFalse(matcher.matchesFile("world/logsx/a.txt"));
+        assertFalse(matcher.matchesDirectory("world/region"));
+    }
+
+    /** 대소문자를 가리지 않는 규칙이 조각 훑기에서도 같아야 한다. */
+    @Test
+    void enclosingDirectoryShortcutIsCaseInsensitive() {
+        GlobMatcher matcher = new GlobMatcher(List.of("**/Cache/**"));
+
+        assertTrue(matcher.matchesFile("world/cache/a.bin"));
+        assertTrue(matcher.matchesFile("world/CACHE/a.bin"));
+        assertFalse(matcher.matchesFile("world/cachex/a.bin"));
+    }
+
+    /** 폴더 이름에 와일드카드가 있으면 지름길을 쓸 수 없다. 그래도 답은 같아야 한다. */
+    @Test
+    void wildcardInTheDirectoryNameStillWorks() {
+        GlobMatcher matcher = new GlobMatcher(List.of("**/log*/**"));
+
+        assertTrue(matcher.matchesFile("world/logs/a.txt"));
+        assertTrue(matcher.matchesFile("world/logging/a.txt"));
+        assertFalse(matcher.matchesFile("world/blog/a.txt"));
+    }
+
     /** config.yml 오타 하나로 설정 로딩 전체가 예외로 죽으면 안 된다. */
     @Test
     void unclosedBraceDoesNotBreakTheWholeMatcher() {

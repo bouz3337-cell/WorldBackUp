@@ -13,9 +13,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.List;
 import java.util.logging.Logger;
@@ -452,6 +455,157 @@ class BackupRestoreRoundTripTest {
         assertTrue(Files.isDirectory(world.resolve("empty_dir")), "빈 폴더가 복원되어야 한다");
         assertTrue(Files.isDirectory(world.resolve("locks_only")),
                 "제외 파일만 있던 폴더도 복원되어야 한다");
+    }
+
+    /**
+     * "그대로 둘 것" 으로 지정한 폴더는 비어 있어도 사라지지 않아야 한다.
+     *
+     * <p>기존 데이터를 비우는 쪽은 파일 단위로만 {@code preserve} 를 봤고, 빈 폴더는 따로
+     * 지웠다. 그래서 안에 든 파일이 전부 보존 대상인 폴더는 파일만 남고 폴더 자체가
+     * 지워지거나, 애초에 비어 있던 보존 폴더가 조용히 사라졌다. 백업에서 제외한 것을
+     * 복원이 지우면, 제외했다는 사실이 곧 그 폴더를 잃는다는 뜻이 된다.</p>
+     */
+    @Test
+    void preservedDirectoriesAreLeftAloneEvenWhenEmpty() throws Exception {
+        Path serverRoot = tmp.resolve("server12");
+        Path world = serverRoot.resolve("world");
+        Path dataFolder = serverRoot.resolve("plugins/WorldBackUp");
+        Path backupDir = dataFolder.resolve("backups");
+
+        write(world.resolve("level.dat"), "LEVEL");
+        write(serverRoot.resolve("server.properties"), "motd=hello");
+
+        BackupRepository repository = new BackupRepository(backupDir, LOG);
+        repository.ensureDirectory();
+        BackupEntry entry = createBackup(repository, serverRoot, world, backupDir);
+
+        // 백업 이후에 생긴, 백업에서 제외되는 폴더들. 복원이 건드리면 안 된다.
+        Files.createDirectories(world.resolve("logs"));                 // 보존 대상인데 비어 있다
+        write(world.resolve("cache/blob.bin"), "CACHE");                // 안이 전부 보존 대상
+
+        new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
+                false, true,
+                concat(List.of("**/logs/**", "**/cache/**"), entry.excludes()), entry.roots())
+                .write(dataFolder);
+        RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
+
+        assertEquals("LEVEL", read(world.resolve("level.dat")), "복원 자체는 정상이어야 한다");
+        assertTrue(Files.isDirectory(world.resolve("logs")),
+                "비어 있는 보존 폴더가 사라지면 안 된다");
+        assertTrue(Files.isDirectory(world.resolve("cache")),
+                "안이 전부 보존 대상인 폴더도 남아야 한다");
+        assertEquals("CACHE", read(world.resolve("cache/blob.bin")), "보존 대상 파일은 그대로다");
+    }
+
+    /**
+     * 백업 도중 읽다가 끊겨 <b>잘린 채로</b> zip 에 남은 파일은 복원하지 않는다.
+     *
+     * <p>zip 엔트리는 한 번 쓰면 되돌릴 수 없어서, 첫 조각을 읽은 뒤 I/O 오류가 나면
+     * 잘린 엔트리가 아카이브에 남는다. 그걸 그대로 풀면 멀쩡했던 region 파일이
+     * <b>깨진 파일로 덮어써진다.</b> 청크가 재생성되는 것(없는 파일)과 "Corrupt regionfile
+     * header"(잘린 파일)는 전혀 다른 결과다.</p>
+     *
+     * <p>그래서 아카이브에 무엇이 들었는지는 zip 목록이 아니라 <b>매니페스트</b>가 정한다.
+     * 매니페스트에는 끝까지 담은 파일만 적히기 때문이다.</p>
+     */
+    @Test
+    void truncatedEntryIsNotRestoredOverGoodData() throws Exception {
+        Path serverRoot = tmp.resolve("server13");
+        Path world = serverRoot.resolve("world");
+        Path dataFolder = serverRoot.resolve("plugins/WorldBackUp");
+        Path backupDir = dataFolder.resolve("backups");
+
+        write(world.resolve("level.dat"), "LEVEL");
+        write(serverRoot.resolve("server.properties"), "motd=hello");
+        Path region = world.resolve("region/r.0.0.mca");
+        Files.createDirectories(region.getParent());
+        Files.write(region, new byte[300_000]);
+
+        BackupRepository repository = new BackupRepository(backupDir, LOG);
+        repository.ensureDirectory();
+
+        BackupEntry entry;
+        // 첫 조각(128KB)까지만 읽히고 그 뒤가 끊긴다 = 잘린 엔트리가 남는다.
+        try (FileChannel channel = FileChannel.open(region, StandardOpenOption.READ, StandardOpenOption.WRITE);
+             FileLock lock = channel.lock(128 * 1024, Long.MAX_VALUE - 128 * 1024, false)) {
+            assertTrue(lock.isValid());
+            entry = createBackup(repository, serverRoot, world, backupDir);
+        }
+
+        assertTrue(zipContains(entry.archive(), "world/region/r.0.0.mca"),
+                "이 테스트는 잘린 엔트리가 남은 상태를 재현해야 한다");
+        assertFalse(Manifest.readFrom(entry.archive()).orElseThrow().stored("world/region/r.0.0.mca"),
+                "끝까지 담지 못한 파일은 '꺼낼 수 있는 것' 에 들지 않는다");
+
+        FileUtil.deleteRecursively(world);
+
+        new PendingRestore(entry.id(), entry.archive(), null, "tester", System.currentTimeMillis(),
+                false, true, concat(List.of("**/session.lock"), entry.excludes()), entry.roots())
+                .write(dataFolder);
+        RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
+
+        assertEquals("LEVEL", read(world.resolve("level.dat")), "멀쩡한 파일은 복원되어야 한다");
+        assertFalse(Files.exists(region),
+                "잘린 파일을 풀면 깨진 region 파일이 된다. 없는 편이 낫다(청크가 재생성된다)");
+    }
+
+    /**
+     * 차등본에서 잘린 파일은 <b>기준 백업의 예전 판</b>으로 되돌린다.
+     *
+     * <p>깨진 파일보다 조금 낡은 파일이 낫고, 없는 파일보다도 낫다. 차등 zip 이 그 파일을
+     * 온전히 담았는지는 매니페스트로 판단하므로, 잘린 엔트리는 "차등이 담당한다" 로 세지
+     * 않고 기준 쪽에서 꺼내 온다.</p>
+     */
+    @Test
+    void truncatedDifferentialEntryFallsBackToTheBaseCopy() throws Exception {
+        Path serverRoot = tmp.resolve("server14");
+        Path world = serverRoot.resolve("world");
+        Path dataFolder = serverRoot.resolve("plugins/WorldBackUp");
+        Path backupDir = dataFolder.resolve("backups");
+
+        write(world.resolve("level.dat"), "LEVEL");
+        write(serverRoot.resolve("server.properties"), "motd=hello");
+        Path region = world.resolve("region/r.0.0.mca");
+        Files.createDirectories(region.getParent());
+        Files.write(region, filled(300_000, (byte) 'A'));   // 기준 백업에 담기는 판
+
+        BackupRepository repository = new BackupRepository(backupDir, LOG);
+        repository.ensureDirectory();
+        BackupEntry full = createBackup(repository, serverRoot, world, backupDir, null, "full");
+
+        // 파일이 바뀌었으니 차등본이 새로 담아야 하는데, 하필 읽다가 끊긴다.
+        Thread.sleep(1100);
+        Files.write(region, filled(300_000, (byte) 'B'));
+        BackupEntry diff;
+        try (FileChannel channel = FileChannel.open(region, StandardOpenOption.READ, StandardOpenOption.WRITE);
+             FileLock lock = channel.lock(128 * 1024, Long.MAX_VALUE - 128 * 1024, false)) {
+            assertTrue(lock.isValid());
+            diff = createBackup(repository, serverRoot, world, backupDir, full, "diff");
+        }
+        Manifest diffManifest = Manifest.readFrom(diff.archive()).orElseThrow();
+        assertFalse(diffManifest.stored("world/region/r.0.0.mca"),
+                "이 테스트는 차등본에 잘린 엔트리가 남은 상태를 재현해야 한다");
+        assertTrue(diffManifest.contains("world/region/r.0.0.mca"),
+                "그 시점에 파일이 있었다는 사실은 남아야 기준의 예전 판을 찾을 수 있다");
+
+        FileUtil.deleteRecursively(world);
+
+        new PendingRestore(diff.id(), diff.archive(), full.archive(), "tester", System.currentTimeMillis(),
+                false, true, concat(List.of("**/session.lock"), diff.excludes()), diff.roots())
+                .write(dataFolder);
+        RestoreApplier.applyIfPending(dataFolder, serverRoot, LOG);
+
+        assertTrue(Files.exists(region), "기준 백업에 예전 판이 있으므로 비어 두지 않는다");
+        byte[] restored = Files.readAllBytes(region);
+        assertEquals(300_000, restored.length, "온전한 파일이어야 한다 - 잘린 판이 아니다");
+        assertEquals((byte) 'A', restored[0], "기준 백업의 예전 판으로 되돌아간다");
+        assertEquals((byte) 'A', restored[restored.length - 1]);
+    }
+
+    private static byte[] filled(int length, byte value) {
+        byte[] bytes = new byte[length];
+        java.util.Arrays.fill(bytes, value);
+        return bytes;
     }
 
     /** 매니페스트를 한 줄씩 흘려 읽도록 바꿨으므로, 왕복이 정확한지 확인한다. */
