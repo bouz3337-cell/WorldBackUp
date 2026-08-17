@@ -5,6 +5,7 @@ import io.github.yj.worldbackup.backup.BackupEntry;
 import io.github.yj.worldbackup.backup.BackupRepository;
 import io.github.yj.worldbackup.backup.BackupType;
 import io.github.yj.worldbackup.backup.Manifest;
+import io.github.yj.worldbackup.backup.UnreadableFile;
 import io.github.yj.worldbackup.restore.PendingRestore;
 import io.github.yj.worldbackup.restore.RestoreApplier;
 import io.github.yj.worldbackup.util.FileUtil;
@@ -13,12 +14,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
-import java.nio.channels.FileChannel;
-import java.nio.channels.FileLock;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.List;
 import java.util.logging.Logger;
@@ -525,13 +523,9 @@ class BackupRestoreRoundTripTest {
         BackupRepository repository = new BackupRepository(backupDir, LOG);
         repository.ensureDirectory();
 
-        BackupEntry entry;
         // 첫 조각(128KB)까지만 읽히고 그 뒤가 끊긴다 = 잘린 엔트리가 남는다.
-        try (FileChannel channel = FileChannel.open(region, StandardOpenOption.READ, StandardOpenOption.WRITE);
-             FileLock lock = channel.lock(128 * 1024, Long.MAX_VALUE - 128 * 1024, false)) {
-            assertTrue(lock.isValid());
-            entry = createBackup(repository, serverRoot, world, backupDir);
-        }
+        BackupEntry entry = createBackup(repository, serverRoot, world, backupDir, null, null,
+                UnreadableFile.failingAfterFirstChunk(region));
 
         assertTrue(zipContains(entry.archive(), "world/region/r.0.0.mca"),
                 "이 테스트는 잘린 엔트리가 남은 상태를 재현해야 한다");
@@ -577,12 +571,8 @@ class BackupRestoreRoundTripTest {
         // 파일이 바뀌었으니 차등본이 새로 담아야 하는데, 하필 읽다가 끊긴다.
         Thread.sleep(1100);
         Files.write(region, filled(300_000, (byte) 'B'));
-        BackupEntry diff;
-        try (FileChannel channel = FileChannel.open(region, StandardOpenOption.READ, StandardOpenOption.WRITE);
-             FileLock lock = channel.lock(128 * 1024, Long.MAX_VALUE - 128 * 1024, false)) {
-            assertTrue(lock.isValid());
-            diff = createBackup(repository, serverRoot, world, backupDir, full, "diff");
-        }
+        BackupEntry diff = createBackup(repository, serverRoot, world, backupDir, full, "diff",
+                UnreadableFile.failingAfterFirstChunk(region));
         Manifest diffManifest = Manifest.readFrom(diff.archive()).orElseThrow();
         assertFalse(diffManifest.stored("world/region/r.0.0.mca"),
                 "이 테스트는 차등본에 잘린 엔트리가 남은 상태를 재현해야 한다");
@@ -763,6 +753,13 @@ class BackupRestoreRoundTripTest {
     /** @param base null 이면 전체 백업, 아니면 그 백업을 기준으로 하는 차등 백업 */
     private BackupEntry createBackup(BackupRepository repository, Path serverRoot, Path world, Path backupDir,
                                      BackupEntry base, String suffix) throws IOException {
+        return createBackup(repository, serverRoot, world, backupDir, base, suffix, Files::newInputStream);
+    }
+
+    /** @param opener 읽기 실패를 주입할 때만 쓴다. {@link UnreadableFile} */
+    private BackupEntry createBackup(BackupRepository repository, Path serverRoot, Path world, Path backupDir,
+                                     BackupEntry base, String suffix,
+                                     Archiver.FileOpener opener) throws IOException {
         Instant now = Instant.now();
         String id = BackupEntry.newId(now) + (suffix == null ? "" : "-" + suffix);
         Path archive = backupDir.resolve(BackupEntry.archiveName(id));
@@ -783,7 +780,8 @@ class BackupRestoreRoundTripTest {
                         id, archive, now, BackupType.MANUAL, "테스트", 0L, originalBytes, fileCount,
                         roots, List.of("world"), EXCLUDES, "test", false, true, baseId, true)),
                 null,
-                LOG
+                LOG,
+                opener
         );
 
         BackupEntry entry = new BackupEntry(id, archive, now, BackupType.MANUAL, "테스트",

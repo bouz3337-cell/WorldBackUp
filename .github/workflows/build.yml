@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 커밋된 gradle-wrapper.jar 가 공식 배포본인지 확인한다. 이 파일은 빌드가 실행하는
       # 바이너리라, 바뀐 것을 눈으로 알아채기 어렵다.
@@ -26,7 +26,7 @@ jobs:
 
       # 26.1 부터 마인크래프트는 Java 25 를 요구한다 (build.gradle.kts 의 toolchain 과 같은 값).
       - name: Set up JDK 25
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '25'
@@ -38,7 +38,7 @@ jobs:
       # 실패했을 때 어느 테스트가 왜 깨졌는지 로그만 보고 좁히기 어려운 경우가 있다.
       - name: Upload test report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: test-report
           path: |

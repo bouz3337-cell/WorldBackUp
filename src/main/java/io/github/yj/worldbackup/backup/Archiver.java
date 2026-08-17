@@ -88,6 +88,27 @@ public final class Archiver {
             "png", "jpg", "jpeg", "gif", "webp", "ogg", "mp3", "mp4", "webm");
 
     /**
+     * 백업 대상 파일을 여는 방법.
+     *
+     * <p>실서버에서 쓰이는 구현은 {@link Files#newInputStream} 하나뿐이다. 이 자리가 열려 있는
+     * 이유는 테스트가 <b>"열기는 되고 읽기가 실패하는"</b> 상황을 만들어야 하기 때문이다. 그것이
+     * 이 플러그인에서 가장 자주 일어나는 실패이고({@link #copyInto} 설명), 그 상황에서 무엇을
+     * 매니페스트에 적는지가 백업의 정직성을 결정한다.</p>
+     *
+     * <p>예전에는 {@link java.nio.channels.FileLock} 으로 흉내 냈다. 그런데 그 잠금은
+     * <b>윈도우에서만 강제</b>다 - 리눅스에서는 권고적이라 읽기가 그냥 성공하고, 그래서 정작
+     * 이 플러그인이 대부분 돌아가는 플랫폼에서는 그 검증이 통째로 무력화됐다(CI 를 붙이자마자
+     * 다섯 개가 그 이유로 깨졌다). 배포 대상 플랫폼에서 검증하지 못하는 보장은 보장이 아니다.</p>
+     */
+    @FunctionalInterface
+    public interface FileOpener {
+        InputStream open(Path file) throws IOException;
+    }
+
+    /** 실서버 구현. */
+    private static final FileOpener REAL_FILES = Files::newInputStream;
+
+    /**
      * @param base          차등 백업의 기준이 되는 매니페스트. null 이면 전체 백업.
      * @param expectedBytes 진행률 계산용 예상 크기(0 이면 진행률 대신 누적 용량만 표시)
      * @param metaProvider  (파일 수, 원본 바이트) -> zip 안에 넣을 메타데이터 YAML 문자열
@@ -102,6 +123,22 @@ public final class Archiver {
                                 BiFunction<Integer, Long, String> metaProvider,
                                 Consumer<String> progress,
                                 Logger log) throws IOException {
+        return create(archive, serverRoot, targets, compressionLevel, exclude, base, expectedBytes,
+                metaProvider, progress, log, REAL_FILES);
+    }
+
+    /** @param opener 파일을 여는 방법. 읽기 실패를 주입하는 테스트만 이 자리를 쓴다. {@link FileOpener} */
+    public static Result create(Path archive,
+                                Path serverRoot,
+                                List<Path> targets,
+                                int compressionLevel,
+                                GlobMatcher exclude,
+                                Manifest base,
+                                long expectedBytes,
+                                BiFunction<Integer, Long, String> metaProvider,
+                                Consumer<String> progress,
+                                Logger log,
+                                FileOpener opener) throws IOException {
 
         Files.createDirectories(archive.getParent());
 
@@ -131,13 +168,13 @@ public final class Archiver {
                         if (exclude.matchesFile(relative)) continue;
                         try {
                             addFile(zip, target, relative, Files.readAttributes(target, BasicFileAttributes.class),
-                                    base, buffer, counter, compression, log);
+                                    base, buffer, counter, compression, log, opener);
                         } catch (IOException e) {
                             counter.skipped++;
                             log.log(Level.WARNING, "[백업] 파일을 읽지 못해 건너뜁니다: " + relative, e);
                         }
                     } else {
-                        walkDirectory(zip, serverRoot, target, exclude, base, buffer, counter, compression, log);
+                        walkDirectory(zip, serverRoot, target, exclude, base, buffer, counter, compression, log, opener);
                     }
                 }
 
@@ -193,7 +230,8 @@ public final class Archiver {
                                       byte[] buffer,
                                       Counter counter,
                                       Compression compression,
-                                      Logger log) throws IOException {
+                                      Logger log,
+                                      FileOpener opener) throws IOException {
         // 파일마다 Path 를 정규화하는 대신 뿌리 기준으로 이어 붙인다. 같은 트리를 용량 측정에서
         // 한 번 더 훑으므로 이 비용은 파일 수 × 2 로 들어온다.
         FileUtil.RelativePaths relatives = FileUtil.RelativePaths.under(serverRoot, root);
@@ -228,7 +266,7 @@ public final class Archiver {
                 if (relative == null || exclude.matchesFile(relative)) return FileVisitResult.CONTINUE;
                 if (!attrs.isRegularFile()) return FileVisitResult.CONTINUE;
                 try {
-                    addFile(zip, file, relative, attrs, base, buffer, counter, compression, log);
+                    addFile(zip, file, relative, attrs, base, buffer, counter, compression, log, opener);
                     markWritten();
                 } catch (IOException e) {
                     counter.skipped++;
@@ -291,7 +329,8 @@ public final class Archiver {
                                 byte[] buffer,
                                 Counter counter,
                                 Compression compression,
-                                Logger log) throws IOException {
+                                Logger log,
+                                FileOpener opener) throws IOException {
         long size = attrs.size();
         long modified = attrs.lastModifiedTime().toMillis();
 
@@ -304,7 +343,7 @@ public final class Archiver {
 
         long written;
         try {
-            written = copyInto(zip, file, entryName, modified, buffer, compression, size);
+            written = copyInto(zip, file, entryName, modified, buffer, compression, size, opener);
         } catch (IOException e) {
             // 담지는 못했지만 스냅샷에는 <b>있던</b> 파일이다. 그 사실만 목록에 남긴다.
             // 목록에서 아예 빼면 차등 복원이 "기준 이후 삭제된 파일" 로 보고 지나쳐서,
@@ -343,8 +382,9 @@ public final class Archiver {
                                  long modified,
                                  byte[] buffer,
                                  Compression compression,
-                                 long size) throws IOException {
-        try (InputStream in = Files.newInputStream(file)) {
+                                 long size,
+                                 FileOpener opener) throws IOException {
+        try (InputStream in = opener.open(file)) {
             int read = in.read(buffer);
 
             ZipEntry entry = new ZipEntry(entryName);
