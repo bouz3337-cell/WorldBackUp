@@ -3,7 +3,10 @@ plugins {
 }
 
 group = "io.github.yj"
-version = "1.0.0"
+
+// 1.0.0 이후 백업에 담기는 내용이 바뀌었다(플러그인 자기 config.yml 포함). 같은 버전 번호가
+// 서로 다른 동작을 갖지 않도록 올린다. 변경 내역은 CHANGELOG.md.
+version = "1.1.0"
 
 repositories {
     mavenCentral()
@@ -48,6 +51,18 @@ tasks.processResources {
 tasks.jar {
     archiveBaseName.set("WorldBackUp")
     archiveClassifier.set("")
+}
+
+/**
+ * 버전을 한 줄로 출력한다.
+ *
+ * <p>릴리스 워크플로가 태그 이름과 이 값이 어긋나지 않는지 확인하는 데 쓴다.
+ * {@code v1.2.0} 태그를 밀었는데 jar 가 {@code 1.1.0} 으로 나가면, 받는 쪽은 그 사실을
+ * 알 방법이 없다.</p>
+ */
+tasks.register("printVersion") {
+    val projectVersion = project.version.toString()
+    doLast { println(projectVersion) }
 }
 
 /**

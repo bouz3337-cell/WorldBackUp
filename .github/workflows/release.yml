@@ -1,0 +1,57 @@
+# v1.2.3 형태의 태그를 밀면 jar 를 빌드해 Releases 에 올린다.
+#
+#   git tag v1.1.0 && git push origin v1.1.0
+#
+# 태그를 밀기 전에 build.gradle.kts 의 version 과 CHANGELOG.md 를 먼저 올려 두세요.
+# 어긋나면 아래 확인 단계가 릴리스를 만들지 않고 멈춥니다.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+          cache: gradle
+
+      # 태그와 jar 버전이 어긋나면 받는 쪽은 그 사실을 알 방법이 없다. 올리기 전에 막는다.
+      - name: Check the tag matches the project version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          project="$(./gradlew -q printVersion --no-daemon | tail -1 | tr -d '[:space:]')"
+          echo "태그 $tag · 프로젝트 $project"
+          if [ "$tag" != "$project" ]; then
+            echo "::error::태그($tag)와 build.gradle.kts 의 version($project)이 다릅니다."
+            exit 1
+          fi
+
+      # 테스트가 깨진 것을 릴리스로 내보내지 않는다. (build 가 test 를 포함한다)
+      - name: Build and test
+        run: ./gradlew build --no-daemon --stacktrace
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            build/libs/WorldBackUp-*.jar \
+            --title "$GITHUB_REF_NAME" \
+            --notes "무엇이 바뀌었는지는 [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md) 에 있습니다.
+
+          jar 를 서버의 \`plugins/\` 폴더에 넣고 재시작하세요. 이미 쓰고 계신 서버라면 \`config.yml\` 은 그대로 유지됩니다."
