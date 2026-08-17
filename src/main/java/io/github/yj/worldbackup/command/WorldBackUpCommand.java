@@ -759,38 +759,40 @@ public final class WorldBackUpCommand {
         if (found.isEmpty()) return;
         BackupEntry entry = found.get();
 
-        if (entry.locked()) {
-            Msg.send(sender, "<red>보호된 백업입니다. <white>/wb unlock " + entry.id() + "</white> 후 삭제하세요.</red>");
-            return;
-        }
-        if (plugin.repository().isPinned(entry)) {
-            Msg.send(sender, "<red>지금 만들어지는 차등 백업이 이 백업을 기준으로 삼고 있습니다.</red>");
-            Msg.send(sender, "<gray>백업이 끝난 뒤 다시 시도하세요.</gray>");
-            return;
-        }
-
         List<BackupEntry> all = plugin.repository().list();
         List<BackupEntry> dependents = plugin.repository().dependents(all, entry.id());
 
-        // 차등 백업은 기준 백업 없이는 복원할 수 없다. 즉 기준을 지우는 것은 딸린 차등본을
-        // 지우는 것과 같으므로, 보호된 차등본이 하나라도 있으면 cascade 여부와 무관하게 거부한다.
-        // (이 검사가 없으면 /wb lock 으로 잠근 백업이 cascade 한 번에 사라진다)
-        List<BackupEntry> lockedDependents = dependents.stream().filter(BackupEntry::locked).toList();
-        if (!lockedDependents.isEmpty()) {
-            Msg.send(sender, "<red>보호된 차등 백업 " + lockedDependents.size()
-                    + "개가 이 백업을 기준으로 삼고 있어 삭제할 수 없습니다.</red>");
-            for (BackupEntry dependent : lockedDependents) {
-                Msg.send(sender, "<gray> - <white>" + dependent.id() + "</white> <gold>[보호]</gold></gray>");
+        // 지워도 되는지는 CommandGuards 가 정한다. 여기서는 그 답에 맞는 안내만 고른다.
+        // (판단을 Bukkit 밖으로 빼 두어 서버 없이 검증한다 - CommandGuardsTest)
+        switch (CommandGuards.delete(entry, plugin.repository().isPinned(entry), dependents, cascade)) {
+            case LOCKED -> {
+                Msg.send(sender, "<red>보호된 백업입니다. <white>/wb unlock " + entry.id()
+                        + "</white> 후 삭제하세요.</red>");
+                return;
             }
-            Msg.send(sender, "<gray>먼저 <white>/wb unlock [ID]</white> 로 보호를 해제하세요.</gray>");
-            return;
-        }
-
-        if (!dependents.isEmpty() && !cascade) {
-            Msg.send(sender, "<red>이 백업을 기준으로 삼는 차등 백업이 " + dependents.size() + "개 있습니다.</red>");
-            Msg.send(sender, "<gray>지우면 그 백업들도 복원할 수 없게 됩니다. 함께 지우려면 "
-                    + "<white>/wb delete " + entry.id() + " cascade</white></gray>");
-            return;
+            case PINNED -> {
+                Msg.send(sender, "<red>지금 만들어지는 차등 백업이 이 백업을 기준으로 삼고 있습니다.</red>");
+                Msg.send(sender, "<gray>백업이 끝난 뒤 다시 시도하세요.</gray>");
+                return;
+            }
+            case LOCKED_DEPENDENTS -> {
+                List<BackupEntry> lockedDependents = CommandGuards.lockedAmong(dependents);
+                Msg.send(sender, "<red>보호된 차등 백업 " + lockedDependents.size()
+                        + "개가 이 백업을 기준으로 삼고 있어 삭제할 수 없습니다.</red>");
+                for (BackupEntry dependent : lockedDependents) {
+                    Msg.send(sender, "<gray> - <white>" + dependent.id() + "</white> <gold>[보호]</gold></gray>");
+                }
+                Msg.send(sender, "<gray>먼저 <white>/wb unlock [ID]</white> 로 보호를 해제하세요.</gray>");
+                return;
+            }
+            case NEEDS_CASCADE -> {
+                Msg.send(sender, "<red>이 백업을 기준으로 삼는 차등 백업이 " + dependents.size() + "개 있습니다.</red>");
+                Msg.send(sender, "<gray>지우면 그 백업들도 복원할 수 없게 됩니다. 함께 지우려면 "
+                        + "<white>/wb delete " + entry.id() + " cascade</white></gray>");
+                return;
+            }
+            case OK -> {
+            }
         }
 
         int deleted = 0;
@@ -808,9 +810,8 @@ public final class WorldBackUpCommand {
     }
 
     private void setLocked(CommandSender sender, BackupEntry entry, boolean locked) {
-        // 손상된 백업은 어차피 보관 정책이 보호해 주지 않는다(BackupEntry#protectedFrom).
-        // 잠긴 것처럼 보여 놓고 다음 정리 때 사라지면, 남겨 뒀다고 믿은 쪽이 더 위험하다.
-        if (locked && !entry.complete()) {
+        // 손상된 백업은 잠글 수 없다. 복원에 쓸 수 없는 것을 남겨 뒀다고 믿게 하는 것이 더 위험하다.
+        if (CommandGuards.lock(entry, locked) == CommandGuards.Lock.BROKEN) {
             Msg.send(sender, "<red>손상된 백업은 보호할 수 없습니다: <white>" + entry.id() + "</white></red>");
             Msg.send(sender, entry.isDifferential()
                     ? "<gray>기준이 되는 전체 백업이 없어 복원에 쓸 수 없습니다.</gray>"
@@ -829,26 +830,23 @@ public final class WorldBackUpCommand {
     }
 
     private void prune(CommandSender sender) {
-        if (plugin.backupService().isRunning()) {
-            Msg.send(sender, "<red>백업이 진행 중입니다. 완료 후 다시 시도하세요.</red>");
-            return;
-        }
-        // 복원 실패 정지 중에는 보관 정책을 돌리지 않는다.
-        //
-        // 그 정지가 존재하는 이유가 "반쯤 복원된 월드가 백업되면서 멀쩡한 예전 백업이 정책에
-        // 밀려 사라지는 것" 인데, 정작 그 정책을 직접 부르는 이 명령만 검사를 빠뜨리고 있었다.
-        // 자동 주기·백업 뒤 정리·시작 시 정리·공간 확보는 모두 이 정지를 지킨다. 하필 디스크가
-        // 모자란 상황에서 관리자가 가장 먼저 떠올리는 명령이 이것이라, 빠진 자리가 나빴다.
-        //
-        // /wb delete 는 계속 쓸 수 있다. 그쪽은 무엇을 지우는지 관리자가 직접 지목하므로
+        // /wb delete 는 이 정지에 걸리지 않는다. 그쪽은 무엇을 지우는지 관리자가 직접 지목하므로
         // "정책이 몰래 밀어내는" 일이 아니다. 여기서 막는 것은 자동 정책뿐이다.
-        if (plugin.restoreFailureHold()) {
-            Msg.send(sender, "<red>복원 실패 기록이 남아 있어 보관 정리를 하지 않습니다.</red>");
-            Msg.send(sender, "<gray>지금 정리하면 반쯤 복원된 월드를 되돌릴 백업이 정책에 밀려 사라질 수 있습니다.</gray>");
-            Msg.send(sender, "<gray>월드를 확인한 뒤 <white>plugins/WorldBackUp/restore-failed-*.yml</white> 을 "
-                    + "지우고 <white>/wb reload</white> 하세요.</gray>");
-            Msg.send(sender, "<gray>특정 백업만 지우려면 <white>/wb delete [ID]</white> 는 그대로 쓸 수 있습니다.</gray>");
-            return;
+        switch (CommandGuards.prune(plugin.backupService().isRunning(), plugin.restoreFailureHold())) {
+            case BACKUP_RUNNING -> {
+                Msg.send(sender, "<red>백업이 진행 중입니다. 완료 후 다시 시도하세요.</red>");
+                return;
+            }
+            case RESTORE_FAILURE_HOLD -> {
+                Msg.send(sender, "<red>복원 실패 기록이 남아 있어 보관 정리를 하지 않습니다.</red>");
+                Msg.send(sender, "<gray>지금 정리하면 반쯤 복원된 월드를 되돌릴 백업이 정책에 밀려 사라질 수 있습니다.</gray>");
+                Msg.send(sender, "<gray>월드를 확인한 뒤 <white>plugins/WorldBackUp/restore-failed-*.yml</white> 을 "
+                        + "지우고 <white>/wb reload</white> 하세요.</gray>");
+                Msg.send(sender, "<gray>특정 백업만 지우려면 <white>/wb delete [ID]</white> 는 그대로 쓸 수 있습니다.</gray>");
+                return;
+            }
+            case OK -> {
+            }
         }
         Msg.send(sender, "<gray>보관 정책을 적용하는 중입니다...</gray>");
         BackupSettings settings = plugin.settings();
