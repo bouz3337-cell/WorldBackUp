@@ -664,23 +664,54 @@ public final class BackupRepository {
     /**
      * 필요한 공간을 확보하기 위해 오래된(보호되지 않은) 백업부터 삭제한다.
      *
+     * <p>{@code min-backups} 는 <b>여기서도</b> 지킨다. 예전에는 "최소 1개" 만 남겼는데, 그러면
+     * 디스크가 빠듯한 서버에서 백업 한 번이 하한선을 1개까지 깎아 낼 수 있었다. 하필 그 상황
+     * (공간 부족)이 되돌릴 백업이 가장 필요한 상황이라 실패 방향이 최악이다. 설정과 문서가
+     * "어떤 정책으로도 이 개수 아래로 줄이지 않는다" 고 약속하는데 이 경로만 빠져 있었다.</p>
+     *
+     * <p>{@link #rescueToMinimum} 과 <b>같은 기준</b>으로 센다 - 손상된 백업은 복원에 못 쓰므로
+     * 세지 않고, 용량만 차지하니 먼저 나간다. 두 곳의 기준이 어긋나면 한쪽이 지킨 개수를
+     * 다른 쪽이 다시 깎는다.</p>
+     *
      * @return 확보한 바이트 수
      */
     public long freeUpSpace(BackupSettings settings, long neededBytes) {
         if (neededBytes <= 0) return 0L;
         List<BackupEntry> all = list();
+
+        int surviving = 0;
+        for (BackupEntry entry : all) {
+            if (entry.complete()) surviving++;
+        }
+        int remaining = all.size();
+        int floor = Math.max(1, settings.minBackups());
+
         long freed = 0L;
         for (int i = all.size() - 1; i >= 0 && freed < neededBytes; i--) {
             BackupEntry entry = all.get(i);
             if (isPinned(entry)) continue; // 진행 중인 차등 백업의 기준
             if (entry.protectedFrom(settings.protectManual())) continue;
             if (!entry.isDifferential() && !dependents(all, entry.id()).isEmpty()) continue;
-            if (i == 0) break; // 최소 1개는 남긴다.
+            // 손상된 백업은 하한선에 세지 않으므로 이 뒤로도 계속 지울 수 있다. break 가 아니다.
+            if (entry.complete() && surviving <= floor) continue;
+            // 다만 마지막 하나는 손상 여부와 무관하게 남긴다. "손상" 판정에는 "사이드카와 zip
+            // 메타를 둘 다 못 읽었다" 도 포함되어서, 일시적인 I/O 오류로 멀쩡한 백업이 그렇게
+            // 잡힐 수 있다. 그 판정 하나를 믿고 백업 폴더를 비우는 것은 너무 나간 것이다.
+            if (remaining <= 1) continue;
             long size = entry.archiveBytes();
             if (delete(entry)) {
                 freed += size;
+                remaining--;
+                if (entry.complete()) surviving--;
                 log.warning("[백업] 디스크 공간 확보를 위해 오래된 백업을 삭제했습니다: " + entry.id());
             }
+        }
+        if (freed < neededBytes && !all.isEmpty()) {
+            // 원인을 하나로 단정하지 않는다. 지우지 못한 이유는 셋 다일 수 있고,
+            // 틀린 진단을 로그에 남기면 관리자가 엉뚱한 곳을 뒤진다.
+            log.warning("[백업] 더 지울 수 있는 백업이 없어 " + FileUtil.humanBytes(neededBytes)
+                    + " 중 " + FileUtil.humanBytes(freed) + " 만 확보했습니다. (최소 보관 "
+                    + floor + "개 · /wb lock 으로 잠근 백업 · 차등본이 딸린 기준 백업은 지우지 않습니다)");
         }
         return freed;
     }

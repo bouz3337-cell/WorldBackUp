@@ -472,6 +472,92 @@ class BackupRetentionTest {
         assertTrue(ids(repo).contains("locked"), "잠근 백업은 용량 상한으로도 지우지 않는다");
     }
 
+    // ------------------------------------------------------------------
+    // 디스크 공간 확보 (freeUpSpace)
+
+    /**
+     * 공간 확보도 최소 보관 개수 아래로는 내려가지 않는다.
+     *
+     * <p>여기가 빠져 있으면 하필 디스크가 빠듯한 서버 - 되돌릴 백업이 가장 필요한 상황에서 -
+     * 백업 한 번이 하한선을 1개까지 깎아 낸다. 설정과 문서는 "어떤 정책으로도" 라고 약속한다.</p>
+     */
+    @Test
+    void freeUpSpaceNeverGoesBelowTheMinimumBackupCount() throws Exception {
+        BackupRepository repo = repository();
+        for (int i = 1; i <= 6; i++) {
+            putSized(repo, "b" + i, at(i, 12), ONE_MB);
+        }
+
+        // 6MB 를 통째로 요구해도 최소 3개는 남아야 한다.
+        long freed = repo.freeUpSpace(settings(cfg -> cfg.set("retention.min-backups", 3)), 6L * ONE_MB);
+
+        assertEquals(List.of("b1", "b2", "b3"), ids(repo), "최신 3개가 남는다");
+        assertEquals(3L * ONE_MB, freed, "지운 만큼만 확보했다고 보고해야 한다");
+    }
+
+    /** 하한선을 꺼 두면 예전처럼 최소 1개는 남긴다. 전멸시키지는 않는다. */
+    @Test
+    void freeUpSpaceStillLeavesOneWhenNoMinimumIsSet() throws Exception {
+        BackupRepository repo = repository();
+        for (int i = 1; i <= 3; i++) {
+            putSized(repo, "b" + i, at(i, 12), ONE_MB);
+        }
+
+        repo.freeUpSpace(settings(cfg -> cfg.set("retention.min-backups", 0)), 3L * ONE_MB);
+
+        assertEquals(List.of("b1"), ids(repo), "하한이 없어도 가장 최근 하나는 남는다");
+    }
+
+    /**
+     * 손상된 백업은 하한선에 세지 않는다. 복원에 쓸 수 없는 것을 남겨 놓고
+     * "3개 지켰다" 고 하면 정작 되돌릴 때 아무것도 없다.
+     */
+    @Test
+    void brokenBackupsDoNotCountTowardTheMinimumWhenFreeingSpace() throws Exception {
+        BackupRepository repo = repository();
+        putSized(repo, "good1", at(1, 12), ONE_MB);
+        putSized(repo, "good2", at(2, 12), ONE_MB);
+        // 사이드카도 zip 내부 메타도 없다 = 압축이 끝나지 않았거나 깨진 백업
+        Files.write(repo.directory().resolve(BackupEntry.archiveName("broken")), new byte[ONE_MB]);
+
+        repo.freeUpSpace(settings(cfg -> cfg.set("retention.min-backups", 2)), 3L * ONE_MB);
+
+        assertEquals(List.of("good1", "good2"), ids(repo),
+                "손상된 백업은 하한선과 무관하게 지워진다");
+    }
+
+    /**
+     * 그래도 마지막 하나는 남긴다.
+     *
+     * <p>"손상" 판정에는 "사이드카와 zip 메타를 둘 다 못 읽었다" 도 포함된다. 디스크가 잠깐
+     * 삐끗해서 멀쩡한 백업이 그렇게 잡힐 수 있는데, 그 판정 하나를 믿고 백업 폴더를 통째로
+     * 비우면 되돌릴 곳이 아예 없어진다.</p>
+     */
+    @Test
+    void freeUpSpaceNeverEmptiesTheFolderEvenIfEverythingLooksBroken() throws Exception {
+        BackupRepository repo = repository();
+        for (int i = 1; i <= 3; i++) {
+            Files.write(repo.directory().resolve(BackupEntry.archiveName("broken" + i)), new byte[ONE_MB]);
+        }
+
+        repo.freeUpSpace(settings(cfg -> cfg.set("retention.min-backups", 0)), 3L * ONE_MB);
+
+        assertEquals(1, ids(repo).size(), "전부 손상으로 보여도 하나는 남는다");
+    }
+
+    /** 잠근 백업은 공간 확보로도 지우지 않는다. */
+    @Test
+    void freeUpSpaceRespectsLockedBackups() throws Exception {
+        BackupRepository repo = repository();
+        BackupEntry locked = putSized(repo, "locked", at(9, 12), ONE_MB);
+        assertTrue(repo.setLocked(locked, true));
+        putSized(repo, "b1", at(1, 12), ONE_MB);
+
+        repo.freeUpSpace(settings(cfg -> cfg.set("retention.min-backups", 0)), 2L * ONE_MB);
+
+        assertTrue(ids(repo).contains("locked"), "잠근 백업은 공간이 급해도 남는다");
+    }
+
     /**
      * 지정한 크기의 백업을 심는다.
      *
