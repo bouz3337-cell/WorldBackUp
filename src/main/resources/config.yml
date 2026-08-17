@@ -226,6 +226,7 @@ retention:
   max-protected: 10
 
   # 남은 디스크 공간이 이 값(GB) 미만이면 백업을 중단하고 경고합니다.
+  # 위 max-total-size-gb 와 마찬가지로 소수점도 됩니다. (0.5 = 512MB)
   min-free-disk-gb: 5
 
 restore:

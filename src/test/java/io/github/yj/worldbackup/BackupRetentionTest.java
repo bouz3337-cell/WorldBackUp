@@ -429,6 +429,35 @@ class BackupRetentionTest {
                 "예전 정책으로 되돌아간다는 사실을 알려야 한다");
     }
 
+    /**
+     * 계단을 <b>항목 형태가 아니게</b> 적은 경우도 알려야 한다.
+     *
+     * <p>{@code getMapList} 는 map 이 아닌 항목을 조용히 버려서, 위 경고에도 걸리지 않고
+     * "계단을 안 쓴 것" 과 구별되지 않았다. 그러면 관리자는 자는 동안의 1시간 해상도가
+     * 지켜진다고 믿는데 실제로는 예전 정책이 돌고, 그 사실은 되돌려야 하는 날에야 드러난다.</p>
+     */
+    @Test
+    void tiersWrittenInTheWrongShapeAreCalledOut() {
+        BackupSettings settings = settings(cfg ->
+                cfg.set("retention.tiers", List.of("every: 0, keep: 8", "every: 1h, keep: 10")));
+
+        assertTrue(settings.tiers().isEmpty());
+        assertTrue(settings.tierWarnings().stream().anyMatch(w -> w.contains("예전 정책")),
+                "예전 정책으로 동작한다는 사실을 알려야 한다: " + settings.tierWarnings());
+        assertTrue(settings.tierWarnings().stream().anyMatch(w -> w.contains("every")),
+                "올바른 형식을 보여 줘야 한다: " + settings.tierWarnings());
+    }
+
+    /** 반대로 일부러 비운 것은 정상적인 사용법이므로 경고하지 않는다. */
+    @Test
+    void anEmptyTierListIsNotAMistake() {
+        BackupSettings settings = settings(cfg -> cfg.set("retention.tiers", List.of()));
+
+        assertTrue(settings.tiers().isEmpty());
+        assertTrue(settings.tierWarnings().isEmpty(),
+                "계단을 쓰지 않겠다고 적은 것이다: " + settings.tierWarnings());
+    }
+
     /** 계단이 다 솎아내도 최소 보관 개수는 지켜야 한다. */
     @Test
     void minBackupsStillAppliesUnderTiers() throws Exception {

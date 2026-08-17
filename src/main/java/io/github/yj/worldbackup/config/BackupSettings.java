@@ -123,10 +123,13 @@ public final class BackupSettings {
         this.keepDaily = Math.max(0, cfg.getInt("retention.keep-daily", 7));
         this.protectManual = cfg.getBoolean("retention.protect-manual", true);
         this.maxProtected = Math.max(0, cfg.getInt("retention.max-protected", 10));
-        this.minFreeDiskBytes = Math.max(0L, cfg.getLong("retention.min-free-disk-gb", 5)) * 1024L * 1024L * 1024L;
-        // 소수점을 허용한다. 작은 서버는 0.5(=512MB) 처럼 잡고 싶을 수 있다.
-        this.maxTotalBytes = (long) (Math.max(0.0, cfg.getDouble("retention.max-total-size-gb", 0))
-                * 1024L * 1024L * 1024L);
+        // 두 값 모두 소수점을 허용한다. 작은 서버는 0.5(=512MB) 처럼 잡고 싶을 수 있다.
+        //
+        // min-free-disk-gb 는 예전에 getLong 이었다. 그러면 0.5 가 조용히 0 이 되어 - 디스크
+        // 여유를 확보해 달라고 적어 둔 값이 "여유 없음" 으로 바뀐다. 하필 공간이 빠듯한 서버에서만
+        // 그렇게 되고, 아무 경고도 없어서 백업이 디스크를 끝까지 채운 뒤에야 드러난다.
+        this.minFreeDiskBytes = gigabytesToBytes(cfg.getDouble("retention.min-free-disk-gb", 5));
+        this.maxTotalBytes = gigabytesToBytes(cfg.getDouble("retention.max-total-size-gb", 0));
 
         this.countdownSeconds = Math.max(0, cfg.getInt("restore.countdown-seconds", 15));
         this.safetyBackup = cfg.getBoolean("restore.create-safety-backup", true);
@@ -231,6 +234,17 @@ public final class BackupSettings {
     }
 
     /**
+     * GB 설정값을 바이트로. 음수는 0(제한 없음)으로 본다.
+     *
+     * <p>{@code public} 인 이유는 하나뿐이다 - 소수점이 조용히 0 으로 잘리면 관리자가 걸어 둔
+     * 디스크 브레이크가 <b>없는 것과 같아진다.</b> 그 경계를 테스트로 못 박아 둔다.</p>
+     */
+    public static long gigabytesToBytes(double gigabytes) {
+        if (!(gigabytes > 0)) return 0L; // 음수·0·NaN
+        return (long) (gigabytes * 1024L * 1024L * 1024L);
+    }
+
+    /**
      * {@code retention.tiers} 를 읽는다. 비어 있으면 예전 정책(max-backups/max-age-days/keep-daily)을 쓴다.
      *
      * <p>형식이 깨진 항목은 조용히 버리지 않고 건너뛰되, 하나라도 제대로 읽히면 계단식으로 동작한다.
@@ -260,6 +274,25 @@ public final class BackupSettings {
         if (tiers.isEmpty() && !raw.isEmpty()) {
             tierWarnings.add("retention.tiers 를 하나도 읽지 못해 예전 정책"
                     + "(max-backups/max-age-days/keep-daily)으로 동작합니다.");
+        }
+
+        // 계단을 적었는데 <b>항목 형태가 아예 아닌</b> 경우.
+        //
+        // getMapList 는 map 이 아닌 항목을 조용히 버리므로 위 경고에도 걸리지 않는다
+        // (raw 가 빈 목록이 되어 "계단을 안 쓴 것" 과 구별되지 않는다). 그러면 관리자는
+        // 자는 동안의 1시간 해상도가 지켜지고 있다고 믿는데 실제로는 예전 정책이 돌고,
+        // 그 사실은 정작 되돌려야 하는 날에야 드러난다.
+        //
+        // "tiers: []" 로 <b>일부러</b> 비운 것은 정상적인 사용법이므로 경고하지 않는다.
+        if (raw.isEmpty()) {
+            List<?> written = cfg.getList("retention.tiers");
+            if (written != null && !written.isEmpty()) {
+                tierWarnings.add("retention.tiers 에 " + written.size()
+                        + "개가 적혀 있는데 계단으로 읽을 수 있는 항목이 없습니다. 예전 정책"
+                        + "(max-backups/max-age-days/keep-daily)으로 동작합니다.");
+                tierWarnings.add("  형식은 - { every: 1h, keep: 10 } 처럼 every 와 keep 을 가진"
+                        + " 항목이어야 합니다. /wb status 에 실제로 적용된 정책이 표시됩니다.");
+            }
         }
         return List.copyOf(tiers);
     }
