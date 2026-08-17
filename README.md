@@ -621,6 +621,11 @@ retention:
 - `WorldLayoutTest` — 차원 폴더에서 진짜 월드 폴더로 올라가기
 - `SuggestionHintTest` — 탭 완성 설명이 명령이 실제로 고르는 백업과 일치하는지.
   두 계산이 갈라지면 사고 직후에 설명을 믿고 엉뚱한 시점으로 되돌아가게 됩니다
+- `CommandGuardsTest` — **파괴적인 명령이 무엇을 거부하는지.** `/wb delete`·`/wb lock`·`/wb prune`
+  의 판단을 [`CommandGuards`](src/main/java/io/github/yj/worldbackup/command/CommandGuards.java) 로
+  떼어 내 서버 없이 검증합니다. 특히 "잠긴 차등본이 딸린 기준 백업은 `cascade` 를 붙여도 거부"
+  처럼 **검사 순서가 곧 계약**인 것들을 못 박습니다 — 순서가 밀리면 `/wb lock` 으로 잠근 백업이
+  명령 한 번에 사라집니다. 판단부가 다시 Bukkit 에 묶이지 않는지도 테스트가 지켜봅니다
 - `GlobMatcherTest` — 제외/보존 패턴 매칭 (윈도우 `\` 경로 포함). `**/X` 를 마지막 경로 조각만
   검사하도록 최적화했으므로, 그 지름길이 답을 바꾸지 않는지(특히 `**` 가 꼬리에 들어간 경우)까지 확인
 - `SymlinkTargetTest` — 심볼릭 링크로 옮긴 월드도 백업되고, 복원이 링크 자체를 치우지 않는지.
