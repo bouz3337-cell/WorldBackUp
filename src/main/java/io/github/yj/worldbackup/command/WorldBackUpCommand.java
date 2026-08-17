@@ -833,6 +833,23 @@ public final class WorldBackUpCommand {
             Msg.send(sender, "<red>백업이 진행 중입니다. 완료 후 다시 시도하세요.</red>");
             return;
         }
+        // 복원 실패 정지 중에는 보관 정책을 돌리지 않는다.
+        //
+        // 그 정지가 존재하는 이유가 "반쯤 복원된 월드가 백업되면서 멀쩡한 예전 백업이 정책에
+        // 밀려 사라지는 것" 인데, 정작 그 정책을 직접 부르는 이 명령만 검사를 빠뜨리고 있었다.
+        // 자동 주기·백업 뒤 정리·시작 시 정리·공간 확보는 모두 이 정지를 지킨다. 하필 디스크가
+        // 모자란 상황에서 관리자가 가장 먼저 떠올리는 명령이 이것이라, 빠진 자리가 나빴다.
+        //
+        // /wb delete 는 계속 쓸 수 있다. 그쪽은 무엇을 지우는지 관리자가 직접 지목하므로
+        // "정책이 몰래 밀어내는" 일이 아니다. 여기서 막는 것은 자동 정책뿐이다.
+        if (plugin.restoreFailureHold()) {
+            Msg.send(sender, "<red>복원 실패 기록이 남아 있어 보관 정리를 하지 않습니다.</red>");
+            Msg.send(sender, "<gray>지금 정리하면 반쯤 복원된 월드를 되돌릴 백업이 정책에 밀려 사라질 수 있습니다.</gray>");
+            Msg.send(sender, "<gray>월드를 확인한 뒤 <white>plugins/WorldBackUp/restore-failed-*.yml</white> 을 "
+                    + "지우고 <white>/wb reload</white> 하세요.</gray>");
+            Msg.send(sender, "<gray>특정 백업만 지우려면 <white>/wb delete [ID]</white> 는 그대로 쓸 수 있습니다.</gray>");
+            return;
+        }
         Msg.send(sender, "<gray>보관 정책을 적용하는 중입니다...</gray>");
         BackupSettings settings = plugin.settings();
         Sched.async(plugin, () -> {
