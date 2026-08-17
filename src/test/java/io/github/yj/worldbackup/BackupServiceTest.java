@@ -232,6 +232,113 @@ class BackupServiceTest {
     }
 
     // ------------------------------------------------------------------
+    // 무인 서버에서 백업이 무기한 비지 않는가
+
+    /**
+     * 변경이 없어 보여도 연속 생략에는 하한이 있다.
+     *
+     * <p>"변경 없음" 은 블록 설치·파괴·접속만 보고 내리는 판단이다. 강제 로드된 청크에서 도는
+     * 농장이나 플러그인이 직접 쓰는 데이터는 잡히지 않으므로, 하한이 없으면 무인 기간의 백업이
+     * 통째로 비어 버린다. 하필 그 사이에 서버가 죽으면 되돌릴 지점이 없다.</p>
+     */
+    @Test
+    void skippingHasAFloorSoQuietServersStillGetBackedUp() throws Exception {
+        configure(cfg -> {
+            cfg.set("backup.skip-if-no-players", true);
+            cfg.set("backup.max-skipped-cycles", 3);
+        });
+        BackupService service = new BackupService(server);
+
+        // 접속자 없이 백업을 한 번 돌리면 그 시점이 스냅샷 경계가 되어 "변경 없음" 이 된다.
+        server.online = false;
+        service.runBlocking(BackupType.SCHEDULED, null, null);
+
+        assertTrue(service.shouldSkipScheduled(), "1번째 주기는 건너뛴다");
+        assertTrue(service.shouldSkipScheduled(), "2번째 주기도 건너뛴다");
+        assertFalse(service.shouldSkipScheduled(), "3번째는 변경이 없어 보여도 백업해야 한다");
+        assertTrue(service.shouldSkipScheduled(), "그 뒤로는 다시 세기 시작한다");
+    }
+
+    /** 백업이 실제로 만들어지면 종류와 무관하게 카운터가 풀린다. */
+    @Test
+    void anyRealBackupResetsTheSkipCounter() throws Exception {
+        configure(cfg -> {
+            cfg.set("backup.skip-if-no-players", true);
+            cfg.set("backup.max-skipped-cycles", 3);
+        });
+        BackupService service = new BackupService(server);
+
+        server.online = false;
+        service.runBlocking(BackupType.SCHEDULED, null, null);
+        assertTrue(service.shouldSkipScheduled());
+        assertTrue(service.shouldSkipScheduled());
+
+        // 관리자가 직접 백업했다. 이 시점의 스냅샷이 남았으니 강제로 하나 더 뜰 이유가 없다.
+        service.runBlocking(BackupType.MANUAL, null, null);
+
+        assertTrue(service.shouldSkipScheduled(), "다시 처음부터 센다");
+        assertTrue(service.shouldSkipScheduled());
+        assertFalse(service.shouldSkipScheduled());
+    }
+
+    /**
+     * 백업이 <b>실패하면</b> 하한을 기다리지 않고 다음 주기에 곧바로 다시 시도한다.
+     *
+     * <p>하한 카운터는 이름 그대로 "건너뛴 횟수" 만 센다. 실패한 백업은 건너뛴 것이 아니므로
+     * 카운터를 건드리지 않는데, 그것만으로는 부족하다 - 실패해도 아무것도 남지 않은 건 마찬가지라
+     * 다음 주기가 "변경 없음" 으로 또 건너뛰면 공백이 그대로 이어진다. 이 재시도는
+     * {@link BackupService#execute} 의 {@code !archived} 분기가 변경 플래그를 되돌려 주기
+     * 때문에 성립한다.</p>
+     *
+     * <p>두 장치는 서로 다른 이유로 각각 존재하고, 이 동작은 <b>둘이 맞물려야만</b> 나온다.
+     * 한쪽을 고치면서 다른 쪽을 잊으면 백업이 계속 깨지는 무인 서버가 하한을 채울 때까지
+     * (기본값으로 하루) 아무 시도도 하지 않게 된다. 그래서 못 박아 둔다.</p>
+     */
+    @Test
+    void aFailedBackupIsRetriedNextCycleInsteadOfWaitingOutTheFloor() throws Exception {
+        Consumer<YamlConfiguration> quietServer = cfg -> {
+            cfg.set("backup.skip-if-no-players", true);
+            cfg.set("backup.max-skipped-cycles", 3);
+        };
+        configure(quietServer);
+        BackupService service = new BackupService(server);
+
+        server.online = false;
+        service.runBlocking(BackupType.SCHEDULED, null, null);
+        assertTrue(service.shouldSkipScheduled(), "성공한 백업 뒤에는 건너뛴다");
+
+        // 이번 주기는 압축을 시작하기도 전에 실패한다. 남는 백업이 없다.
+        configure(quietServer.andThen(cfg -> cfg.set("retention.min-free-disk-gb", 999_999L)));
+        server.hold = true;
+        assertThrows(Exception.class,
+                () -> service.runBlocking(BackupType.SCHEDULED, null, null));
+
+        // 디스크 문제가 풀렸다. 이제 다음 주기의 판단만 본다.
+        server.hold = false;
+        configure(quietServer);
+
+        assertFalse(service.shouldSkipScheduled(),
+                "실패한 백업은 아무것도 남기지 못했으므로 하한을 기다리면 안 된다");
+    }
+
+    /** 0 은 하한 없음이다. 예전 동작 그대로 무한히 건너뛴다. */
+    @Test
+    void aZeroFloorKeepsSkippingForever() throws Exception {
+        configure(cfg -> {
+            cfg.set("backup.skip-if-no-players", true);
+            cfg.set("backup.max-skipped-cycles", 0);
+        });
+        BackupService service = new BackupService(server);
+
+        server.online = false;
+        service.runBlocking(BackupType.SCHEDULED, null, null);
+
+        for (int i = 0; i < 50; i++) {
+            assertTrue(service.shouldSkipScheduled(), i + "번째 주기");
+        }
+    }
+
+    // ------------------------------------------------------------------
     // 도우미
 
     private void configure(Consumer<YamlConfiguration> tweak) {

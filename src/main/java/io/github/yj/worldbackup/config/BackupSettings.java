@@ -25,6 +25,7 @@ public final class BackupSettings {
     private final boolean onStartup;
     private final boolean onShutdown;
     private final boolean skipIfNoPlayers;
+    private final int maxSkippedCycles;
     private final int compressionLevel;
     private final Path backupDir;
     private final boolean broadcast;
@@ -72,7 +73,7 @@ public final class BackupSettings {
         this.serverRoot = serverRoot;
 
         this.enabled = cfg.getBoolean("backup.enabled", true);
-        String mode = String.valueOf(cfg.getString("backup.mode", "full")).trim().toLowerCase(Locale.ROOT);
+        String mode = String.valueOf(cfg.getString("backup.mode", "differential")).trim().toLowerCase(Locale.ROOT);
         this.differential = mode.startsWith("diff") || mode.startsWith("차등");
         this.fullEvery = Math.max(0, cfg.getInt("backup.full-every", 24));
         this.intervalMinutes = Math.max(1, cfg.getInt("backup.interval-minutes", 30));
@@ -80,6 +81,7 @@ public final class BackupSettings {
         this.onStartup = cfg.getBoolean("backup.on-startup", false);
         this.onShutdown = cfg.getBoolean("backup.on-shutdown", false);
         this.skipIfNoPlayers = cfg.getBoolean("backup.skip-if-no-players", true);
+        this.maxSkippedCycles = Math.max(0, cfg.getInt("backup.max-skipped-cycles", 48));
         this.compressionLevel = Math.min(9, Math.max(0, cfg.getInt("backup.compression-level", 4)));
         this.broadcast = cfg.getBoolean("backup.broadcast", true);
         this.broadcastPermission = cfg.getBoolean("backup.broadcast-permission-only", true)
@@ -125,6 +127,42 @@ public final class BackupSettings {
         List<String> preserveList = cfg.getStringList("restore.preserve");
         if (preserveList.isEmpty()) preserveList = List.of("**/session.lock");
         this.preservePatterns = List.copyOf(preserveList);
+
+        warnIfDeepTiersMeetFullMode();
+    }
+
+    /**
+     * 전체 백업 몇 벌부터 계단 설정을 다시 보라고 할지.
+     *
+     * <p>전체 백업은 한 벌이 곧 월드 하나다. 이 개수를 넘어가면 "월드 크기 × 개수" 가
+     * 웬만한 서버의 디스크를 넘어선다.</p>
+     */
+    private static final int FULL_MODE_TIER_LIMIT = 8;
+
+    /**
+     * {@code mode: full} 과 깊은 계단이 만나면 알린다.
+     *
+     * <p>이 조합은 <b>조용히</b> 실패하는 것이 문제다. 디스크가 먼저 차서 공간 확보 로직이
+     * 매 주기 오래된 백업을 지우고 다시 채우는데, {@code /wb status} 는 그동안 계속
+     * "계단식 5단계 (최대 27개)" 를 보여 준다. 관리자는 자는 동안의 1시간 해상도가 지켜지고
+     * 있다고 믿지만 실제로는 최근 몇 개만 남아 있고, 그 사실은 정작 되돌려야 하는 날에야
+     * 드러난다. 컨테이너 호스팅이면 {@code min-free-disk-gb} 가 호스트 디스크를 보므로
+     * 그 브레이크조차 걸리지 않는다.</p>
+     */
+    private void warnIfDeepTiersMeetFullMode() {
+        if (differential || tiers.isEmpty()) return;
+        int planned = 0;
+        for (RetentionTiers.Tier tier : tiers) planned += tier.keep();
+        if (planned <= FULL_MODE_TIER_LIMIT) return;
+
+        tierWarnings.add("backup.mode 가 full 인데 retention.tiers 는 " + planned
+                + "개를 남기려 합니다. 전체 백업 " + planned + "벌은 월드 크기의 " + planned + "배를 씁니다.");
+        tierWarnings.add("  그대로 두면 디스크가 먼저 차서 계단이 약속한 시간대가 만들어지지 않습니다."
+                + " backup.mode 를 differential 로 바꾸거나 tiers 의 keep 값을 줄이세요.");
+        if (maxTotalBytes <= 0) {
+            tierWarnings.add("  retention.max-total-size-gb 도 0(무제한)이라 상한이 없습니다."
+                    + " 호스팅 환경이라면 반드시 값을 넣으세요.");
+        }
     }
 
     public static BackupSettings load(FileConfiguration cfg, Path dataFolder, Path serverRoot) {
@@ -224,6 +262,15 @@ public final class BackupSettings {
     public boolean onShutdown() { return onShutdown; }
 
     public boolean skipIfNoPlayers() { return skipIfNoPlayers; }
+
+    /**
+     * 연속으로 이만큼 건너뛰었으면 변경이 없어 보여도 한 번은 백업한다. (0 = 하한 없음)
+     *
+     * <p>{@code skip-if-no-players} 의 "변경 없음" 판단은 블록 설치·파괴·접속만 본다.
+     * 강제 로드된 청크의 농장이나 플러그인이 직접 쓰는 데이터는 잡히지 않으므로, 하한이
+     * 없으면 무인 기간의 백업이 통째로 비어 버린다.</p>
+     */
+    public int maxSkippedCycles() { return maxSkippedCycles; }
 
     public int compressionLevel() { return compressionLevel; }
 

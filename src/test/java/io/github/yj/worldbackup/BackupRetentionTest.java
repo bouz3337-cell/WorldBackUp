@@ -321,6 +321,56 @@ class BackupRetentionTest {
         assertTrue(settings.tierWarnings().get(1).contains("keep"));
     }
 
+    /**
+     * {@code mode: full} 과 깊은 계단이 만나면 알린다.
+     *
+     * <p>이 조합은 조용히 실패한다. 디스크가 먼저 차서 공간 확보 로직이 매 주기 오래된 백업을
+     * 지우고 다시 채우는데, {@code /wb status} 는 그동안 계속 "계단식 N단계" 를 보여 준다.
+     * 관리자는 자는 동안의 해상도가 지켜지고 있다고 믿지만 실제로는 최근 몇 개만 남아 있고,
+     * 그 사실은 정작 되돌려야 하는 날에야 드러난다.</p>
+     */
+    @Test
+    void fullModeWithDeepTiersIsCalledOut() {
+        BackupSettings settings = settings(cfg -> {
+            cfg.set("backup.mode", "full");
+            cfg.set("retention.tiers", List.of(
+                    Map.of("every", "0", "keep", 8),
+                    Map.of("every", "1h", "keep", 10)));
+        });
+
+        assertEquals(2, settings.tiers().size(), "계단 자체는 멀쩡히 읽힌다");
+        assertTrue(settings.tierWarnings().stream().anyMatch(w -> w.contains("18")),
+                "몇 벌을 쓰게 되는지 숫자로 말해야 한다: " + settings.tierWarnings());
+        assertTrue(settings.tierWarnings().stream().anyMatch(w -> w.contains("differential")),
+                "무엇을 바꾸면 되는지도 알려야 한다: " + settings.tierWarnings());
+    }
+
+    /** 같은 계단이라도 차등 모드면 문제가 없다. 위 경고가 계단 자체를 탓하는 것이 아님을 못 박는다. */
+    @Test
+    void theSameTiersAreFineInDifferentialMode() {
+        BackupSettings settings = settings(cfg -> {
+            cfg.set("backup.mode", "differential");
+            cfg.set("retention.tiers", List.of(
+                    Map.of("every", "0", "keep", 8),
+                    Map.of("every", "1h", "keep", 10)));
+        });
+
+        assertTrue(settings.differential());
+        assertTrue(settings.tierWarnings().isEmpty(), "경고할 것이 없다: " + settings.tierWarnings());
+    }
+
+    /** 계단이 얕으면 full 이어도 그냥 둔다. 경고가 잔소리가 되면 아무도 읽지 않는다. */
+    @Test
+    void shallowTiersDoNotTriggerTheFullModeWarning() {
+        BackupSettings settings = settings(cfg -> {
+            cfg.set("backup.mode", "full");
+            cfg.set("retention.tiers", List.of(Map.of("every", "0", "keep", 3)));
+        });
+
+        assertFalse(settings.differential());
+        assertTrue(settings.tierWarnings().isEmpty(), "경고할 것이 없다: " + settings.tierWarnings());
+    }
+
     @Test
     void allTiersBrokenIsCalledOutExplicitly() {
         BackupSettings settings = settings(cfg -> cfg.set("retention.tiers", List.of(

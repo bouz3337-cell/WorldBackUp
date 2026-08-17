@@ -17,6 +17,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 
 /** 백업 실행을 담당한다. 파일 압축은 비동기, 월드 저장은 메인 스레드에서 처리한다. */
@@ -45,6 +46,15 @@ public final class BackupService {
 
     /** 복원 직후처럼 기준을 새로 잡아야 하는 상황에서 다음 백업을 전체 백업으로 강제한다. */
     private final AtomicBoolean forceFullBackup = new AtomicBoolean(false);
+
+    /**
+     * 변경이 없다고 보고 연속으로 건너뛴 자동 백업 주기 수.
+     *
+     * <p>{@code max-skipped-cycles} 의 하한을 재기 위한 값이다. 백업이 실제로 만들어지면
+     * 종류와 상관없이 0으로 돌아간다 - 관리자가 {@code /wb backup} 을 한 번 쳤다면 그 시점의
+     * 스냅샷이 이미 남았으므로 강제로 하나 더 뜰 이유가 없다.</p>
+     */
+    private final AtomicInteger skippedCycles = new AtomicInteger();
 
     public BackupService(ServerBridge server) {
         this.server = server;
@@ -89,12 +99,31 @@ public final class BackupService {
         forceFullBackup.set(true);
     }
 
-    /** 자동 백업을 건너뛰어도 되는 상황인지. (메인 스레드에서 호출) */
+    /**
+     * 자동 백업을 건너뛰어도 되는 상황인지. (메인 스레드에서 호출)
+     *
+     * <p>건너뛰기로 판단하면 그 사실을 세어 둔다. {@code max-skipped-cycles} 를 채우면
+     * 변경이 없어 보여도 한 번은 뜬다 - "변경 없음" 은 블록 설치·파괴·접속만 보고 내리는
+     * 판단이라, 강제 로드된 청크의 농장이나 플러그인이 직접 쓰는 데이터는 잡히지 않는다.
+     * 하한이 없으면 무인 기간의 백업이 통째로 비고, 하필 그 사이에 서버가 죽으면 되돌릴
+     * 지점이 없다.</p>
+     */
     public boolean shouldSkipScheduled() {
         BackupSettings settings = server.settings();
         if (!settings.skipIfNoPlayers()) return false;
         if (server.hasOnlinePlayers()) return false;
-        return !worldChanged.get();
+        if (worldChanged.get()) return false;
+
+        int limit = settings.maxSkippedCycles();
+        if (limit <= 0) return true;
+
+        int skipped = skippedCycles.incrementAndGet();
+        if (skipped < limit) return true;
+
+        server.logger().info("[백업] 변경이 없어 보이지만 " + skipped
+                + "번 연속으로 건너뛰었습니다. 이번 주기는 백업합니다.");
+        skippedCycles.set(0);
+        return false;
     }
 
     /** 비동기 백업 시작. 이미 진행 중이면 실패한 future 를 반환한다. */
@@ -360,6 +389,9 @@ public final class BackupService {
             lastBackup = entry;
             lastError = null;
             forceFullBackup.set(false);
+            // 종류를 가리지 않는다. 수동 백업이든 시작 백업이든 이 시점의 스냅샷이 남았으므로
+            // 강제로 하나 더 뜰 이유가 없다.
+            skippedCycles.set(0);
 
             long elapsed = System.currentTimeMillis() - startedAt;
             double ratio = result.originalBytes() > 0

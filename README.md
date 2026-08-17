@@ -273,12 +273,13 @@ restore:
 
 | 키 | 기본값 | 설명 |
 |---|---|---|
-| `backup.mode` | `full` | `full` 또는 `differential` |
+| `backup.mode` | `differential` | `full` 또는 `differential`. 아래 `tiers` 기본값이 이걸 전제로 함 |
 | `backup.full-every` | 24 | 차등본 N개마다 전체 백업 재생성 |
 | `backup.interval-minutes` | 30 | 자동 백업 주기(분) |
 | `backup.compression-level` | 4 | 0(빠름) ~ 9(최대 압축) |
 | `backup.directory` | `backups` | 상대 경로면 `plugins/WorldBackUp/` 기준. **다른 디스크 권장** |
 | `backup.skip-if-no-players` | true | 접속자·변경 없으면 자동 백업 생략 |
+| `backup.max-skipped-cycles` | 48 | 연속 생략 상한. 채우면 변경이 없어 보여도 한 번은 백업 |
 | `backup.on-shutdown` | false | 서버 종료 시 백업(종료가 느려짐) |
 | `targets.worlds` | `["*"]` | 백업할 월드. 플레이어 데이터는 메인 월드 폴더에 있음 |
 | `targets.extra-paths` | `[]` | `plugins/LuckPerms` 등 추가 백업 경로 |
@@ -298,14 +299,32 @@ restore:
 
 ### 차등 백업 (용량·시간 절감)
 
-기본값은 `full` 입니다. 매번 월드 전체를 압축하므로 백업 하나하나가 독립적이고 가장 단순합니다.
-월드가 크고 주기가 짧다면 `differential` 로 바꾸세요.
+**기본값은 `differential` 입니다.** 아래 `retention.tiers` 기본값이 27개를 남기는데,
+`full` 이면 그 27개가 전부 "월드 한 벌씩" 이라 디스크가 먼저 차기 때문입니다.
 
 ```yaml
 backup:
   mode: differential
   full-every: 24    # 30분 주기 기준 하루 한 번 전체 백업
 ```
+
+`full` 은 백업 하나하나가 독립적이라 가장 단순합니다. 그쪽을 쓰시려면 `tiers` 의 `keep`
+값을 크게 줄이거나 `tiers` 를 비우세요. 두 값이 어긋나면 서버 시작 시 콘솔에 경고가 뜹니다.
+
+> **이미 쓰고 계신 서버라면 — 저절로 바뀌지 않습니다.**
+> 플러그인은 `config.yml` 이 **없을 때만** 새로 씁니다. 이미 있는 파일은 건드리지 않으므로,
+> 예전 버전에서 받은 `mode: full` 이 그대로 남고 동작도 그대로입니다. 바뀌는 것은 딱 하나 —
+> `full` 과 깊은 `tiers` 를 함께 쓰고 계셨다면 이제 시작할 때 콘솔에 경고가 뜹니다.
+> 그 경고를 보셨다면 둘 중 하나를 고르시면 됩니다.
+>
+> - **`mode: differential` 로 바꾸기** — 계단을 그대로 두고 용량만 줄입니다. 갖고 계신
+>   **가장 최근 전체 백업이 그대로 기준이 되므로** 월드를 다시 통째로 압축하지 않고, 바로
+>   다음 백업부터 차등본이 쌓입니다. 예전 `full` 백업들은 하나하나가 독립적이라 그대로
+>   복원에 쓸 수 있습니다.
+> - **`tiers` 의 `keep` 줄이기 (또는 `tiers` 비우기)** — `full` 의 단순함을 지키는 대신
+>   되돌릴 수 있는 시점의 수를 포기합니다.
+>
+> 어느 쪽이든 고친 뒤 `/wb reload` 면 반영됩니다.
 
 전체 백업 하나를 기준으로, 이후에는 **크기와 수정 시각이 달라진 파일만** 저장합니다.
 10GB 월드라면 차등본 하나가 보통 수십~수백 MB입니다.
@@ -380,6 +399,8 @@ retention:
 잃는 것이 최대 1시간입니다. 15분 주기 기준 총 27개로 약 16일이 덮입니다.
 
 > **`mode: differential` 전제입니다.** `full` 이면 27개가 전부 월드 한 벌씩이라 감당이 안 됩니다.
+> 그래서 `backup.mode` 의 기본값도 `differential` 입니다. 굳이 `full` 로 두시면 서버 시작 시
+> 콘솔에 경고가 뜨는데, 무시하면 디스크가 먼저 차서 **아래 계단은 만들어지지도 못합니다.**
 
 ### 용량은 깊이가 결정합니다
 
