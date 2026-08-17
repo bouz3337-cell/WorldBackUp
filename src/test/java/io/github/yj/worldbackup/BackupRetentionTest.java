@@ -654,7 +654,62 @@ class BackupRetentionTest {
     }
 
     /**
-     * 그래도 마지막 하나는 남긴다.
+     * 보관 정리도 <b>전부 손상으로 보인다는 이유로</b> 폴더를 비우지 않는다.
+     *
+     * <p>"손상" 판정에는 "사이드카와 zip 메타를 둘 다 못 읽었다" 가 포함된다. 정말 깨진 백업일
+     * 수도 있지만, 네트워크 저장소의 일시적인 I/O 오류이거나 백업 폴더를 밖에서 동기화하는
+     * 중(zip 은 도착했고 사이드카는 아직)일 수도 있다 - README 가 백업본을 외부로 복사하라고
+     * 권하므로 후자는 실제로 일어난다.</p>
+     *
+     * <p>{@link BackupRepository#freeUpSpace} 는 이 규칙을 지키는데 정리 쪽에는 없었다.
+     * 한쪽만 지키면 다른 쪽이 비운다. 하필 계단식이 <b>기본값</b>이라 기본 설정에서 걸린다 -
+     * 계단 대표는 멀쩡한 백업에서만 뽑히므로, 전부 손상으로 보이면 남길 것이 하나도 없다.</p>
+     */
+    @Test
+    void pruneNeverEmptiesTheFolderWhenNothingLooksReadable() throws Exception {
+        BackupRepository repo = repository();
+        for (int i = 1; i <= 3; i++) {
+            Files.write(repo.directory().resolve(BackupEntry.archiveName("broken" + i)), new byte[ONE_MB]);
+        }
+
+        repo.prune(settings(cfg -> cfg.set("retention.tiers",
+                List.of(Map.of("every", "0", "keep", 8)))));
+
+        assertEquals(1, ids(repo).size(),
+                "전부 손상으로 보여도 되돌릴 곳을 통째로 없애면 안 된다: " + ids(repo));
+    }
+
+    /** 총 용량 상한 경로도 같다. 상한이 한 개보다 작으면 전부 지우려 든다. */
+    @Test
+    void theTotalSizeCapAlsoLeavesOneWhenNothingLooksReadable() throws Exception {
+        BackupRepository repo = repository();
+        for (int i = 1; i <= 3; i++) {
+            Files.write(repo.directory().resolve(BackupEntry.archiveName("broken" + i)), new byte[ONE_MB]);
+        }
+
+        // 0.0005GB = 약 512KB. 한 개(1MB)조차 넘는 상한이다.
+        repo.prune(settings(cfg -> cfg.set("retention.max-total-size-gb", 0.0005)));
+
+        assertEquals(1, ids(repo).size(),
+                "상한을 못 맞추더라도 마지막 하나는 남긴다: " + ids(repo));
+    }
+
+    /** 반대로 <b>읽을 수 있는</b> 백업이 있었다면 min-backups: 0 의 결정을 존중한다. */
+    @Test
+    void readableBackupsAreStillDeletableDownToZero() throws Exception {
+        BackupRepository repo = repository();
+        put(repo, "old", at(40, 9), BackupType.SCHEDULED, null);
+
+        repo.prune(settings(cfg -> {
+            cfg.set("retention.max-age-days", 14);
+            cfg.set("retention.min-backups", 0);
+        }));
+
+        assertTrue(ids(repo).isEmpty(), "하한선을 끈 것은 관리자의 명시적인 선택이다");
+    }
+
+    /**
+     * 공간 확보도 마지막 하나는 남긴다.
      *
      * <p>"손상" 판정에는 "사이드카와 zip 메타를 둘 다 못 읽었다" 도 포함된다. 디스크가 잠깐
      * 삐끗해서 멀쩡한 백업이 그렇게 잡힐 수 있는데, 그 판정 하나를 믿고 백업 폴더를 통째로

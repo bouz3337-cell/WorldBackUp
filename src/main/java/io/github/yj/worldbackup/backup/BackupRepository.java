@@ -584,6 +584,7 @@ public class BackupRepository {
 
         rescueToMinimum(settings, all, byId, toDelete);
         enforceTotalSize(settings, all, dependentsByBase, toDelete);
+        keepOneIfNothingLooksReadable(all, toDelete);
 
         // 최종 결과가 정해진 뒤에 한 번만 알린다. (위 루프는 같은 항목을 여러 번 검사한다)
         for (BackupEntry base : heldBack) {
@@ -654,6 +655,38 @@ public class BackupRepository {
             log.info("[백업] 최소 보관 개수(" + settings.minBackups() + "개)를 지키기 위해 "
                     + rescued.size() + "개를 남깁니다: " + String.join(", ", rescued));
         }
+    }
+
+    /**
+     * 전부 "손상" 으로 보여도 백업 폴더를 통째로 비우지는 않는다.
+     *
+     * <p>"손상" 판정에는 <b>사이드카와 zip 메타를 둘 다 못 읽었다</b> 가 포함된다. 정말 깨진
+     * 백업일 수도 있지만, 네트워크 저장소의 일시적인 I/O 오류이거나 백업 폴더를 밖에서
+     * 동기화하는 중(zip 은 도착했고 사이드카는 아직)일 수도 있다 - 백업본을 외부로 복사하는
+     * 것은 이 플러그인이 권하는 운영 방식이므로 후자는 실제로 일어난다. 모른다는 이유로 되돌릴
+     * 곳을 전부 없애는 것은 너무 나간 것이다.</p>
+     *
+     * <p>{@link #freeUpSpace} 는 같은 이유로 같은 규칙을 지키고 있었는데 이쪽에는 없었다.
+     * 한쪽만 지키면 다른 쪽이 비운다. 하필 계단식이 <b>기본값</b>이라 기본 설정에서 걸렸다 -
+     * 계단 대표는 멀쩡한 백업에서만 뽑히므로 전부 손상으로 보이면 남길 것이 하나도 없고,
+     * {@link #rescueToMinimum} 도 손상된 것은 세지 않아 하한선이 작동하지 않는다.</p>
+     *
+     * <p>읽을 수 있는 백업이 하나라도 있었다면 손대지 않는다. 그때 전부 지워지는 것은
+     * {@code min-backups: 0} 처럼 관리자가 명시적으로 고른 결과이고, 여기서 지키려는 것은
+     * "확실하지 않다는 이유로" 비우지 않는 것뿐이다.</p>
+     */
+    private void keepOneIfNothingLooksReadable(List<BackupEntry> all, Set<BackupEntry> toDelete) {
+        if (toDelete.size() < all.size()) return; // 하나라도 남는다
+        for (BackupEntry entry : all) {
+            if (entry.complete()) return; // 멀쩡한 것이 있었다 - 정책의 결정을 존중한다
+        }
+        BackupEntry newest = all.get(0); // 최신순
+        if (!toDelete.remove(newest)) return;
+
+        log.severe("[백업] 백업 " + all.size() + "개의 메타데이터를 하나도 읽지 못했습니다. "
+                + "일시적인 I/O 오류이거나 백업 폴더가 밖에서 동기화되는 중일 수 있어, "
+                + "가장 최근 것(" + newest.id() + ")은 지우지 않았습니다.");
+        log.severe("[백업] 백업 폴더를 확인하세요: " + directory);
     }
 
     /**
