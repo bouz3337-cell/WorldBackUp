@@ -1,12 +1,7 @@
 package io.github.yj.worldbackup.backup;
 
-import io.github.yj.worldbackup.WorldBackUpPlugin;
 import io.github.yj.worldbackup.config.BackupSettings;
 import io.github.yj.worldbackup.util.FileUtil;
-import io.github.yj.worldbackup.util.Msg;
-import io.github.yj.worldbackup.util.Sched;
-import org.bukkit.Bukkit;
-import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 
 import java.io.IOException;
@@ -30,7 +25,7 @@ public final class BackupService {
     /** 메인 스레드 작업을 기다리는 최대 시간. */
     private static final long SYNC_TIMEOUT_SECONDS = 120L;
 
-    private final WorldBackUpPlugin plugin;
+    private final ServerBridge server;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicBoolean worldChanged = new AtomicBoolean(true);
 
@@ -51,8 +46,8 @@ public final class BackupService {
     /** 복원 직후처럼 기준을 새로 잡아야 하는 상황에서 다음 백업을 전체 백업으로 강제한다. */
     private final AtomicBoolean forceFullBackup = new AtomicBoolean(false);
 
-    public BackupService(WorldBackUpPlugin plugin) {
-        this.plugin = plugin;
+    public BackupService(ServerBridge server) {
+        this.server = server;
     }
 
     public boolean isRunning() {
@@ -96,9 +91,9 @@ public final class BackupService {
 
     /** 자동 백업을 건너뛰어도 되는 상황인지. (메인 스레드에서 호출) */
     public boolean shouldSkipScheduled() {
-        BackupSettings settings = plugin.settings();
+        BackupSettings settings = server.settings();
         if (!settings.skipIfNoPlayers()) return false;
-        if (!Bukkit.getOnlinePlayers().isEmpty()) return false;
+        if (server.hasOnlinePlayers()) return false;
         return !worldChanged.get();
     }
 
@@ -110,7 +105,7 @@ public final class BackupService {
             return future;
         }
         try {
-            Sched.async(plugin, () -> {
+            server.runAsync(() -> {
                 try {
                     future.complete(execute(type, label, initiator));
                 } catch (Throwable t) {
@@ -155,7 +150,7 @@ public final class BackupService {
     public void forceThawOnMainThread() {
         Map<String, Boolean> snapshot = drainFrozen();
         if (snapshot.isEmpty()) return;
-        plugin.getLogger().warning("[백업] 백업이 끝나지 않아 월드 자동 저장을 강제로 복구합니다.");
+        server.logger().warning("[백업] 백업이 끝나지 않아 월드 자동 저장을 강제로 복구합니다.");
         restoreAutoSave(snapshot);
     }
 
@@ -188,8 +183,8 @@ public final class BackupService {
 
 
     private BackupEntry execute(BackupType type, String label, CommandSender initiator) throws Exception {
-        BackupSettings settings = plugin.settings();
-        BackupRepository repo = plugin.repository();
+        BackupSettings settings = server.settings();
+        BackupRepository repo = server.repository();
         Path serverRoot = settings.serverRoot();
         long startedAt = System.currentTimeMillis();
 
@@ -212,7 +207,7 @@ public final class BackupService {
         if (baseEntry != null) {
             baseManifest = Manifest.readFrom(baseEntry.archive()).orElse(null);
             if (baseManifest == null) {
-                plugin.getLogger().warning("[백업] 기준 백업 " + baseEntry.id()
+                server.logger().warning("[백업] 기준 백업 " + baseEntry.id()
                         + " 에서 파일 목록을 읽지 못해 전체 백업으로 진행합니다.");
                 baseEntry = null;
             }
@@ -224,7 +219,7 @@ public final class BackupService {
         if (settings.broadcast()) {
             broadcastSafe("<gray>" + type.korean() + " 백업을 시작합니다...</gray>", settings.broadcastPermission());
         } else {
-            plugin.getLogger().info("[백업] " + type.korean() + " 백업 시작 (" + backupId + ")");
+            server.logger().info("[백업] " + type.korean() + " 백업 시작 (" + backupId + ")");
         }
 
         // 아카이브가 최종 이름을 받았는지. 이게 true 가 된 뒤로는 실패해도 파일을 지우지 않는다.
@@ -250,12 +245,12 @@ public final class BackupService {
                 // 거기만 담으면 지형은 되돌아오는데 playerdata, level.dat, data 가 빠진다.
                 Path levelRoot = WorldLayout.levelRoot(ref.folder(), serverRoot);
                 if (FileUtil.relativize(serverRoot, levelRoot) == null) {
-                    plugin.getLogger().warning("[백업] 월드 '" + ref.name() + "' 가 서버 폴더("
+                    server.logger().warning("[백업] 월드 '" + ref.name() + "' 가 서버 폴더("
                             + serverRoot + ") 밖에 있어 백업할 수 없습니다: " + levelRoot);
                     continue;
                 }
                 if (!levelRoot.equals(ref.folder())) {
-                    plugin.getLogger().info("[백업] 월드 '" + ref.name() + "' 는 차원 폴더라 실제 월드 폴더로 올라갑니다: "
+                    server.logger().info("[백업] 월드 '" + ref.name() + "' 는 차원 폴더라 실제 월드 폴더로 올라갑니다: "
                             + FileUtil.relativize(serverRoot, levelRoot));
                 }
                 targets.add(levelRoot);
@@ -271,7 +266,7 @@ public final class BackupService {
                 targets.add(path);
             }
             if (!playerData.inventory()) {
-                PlayerData.warnMissing(plugin.getLogger(), serverRoot, playerDataBases);
+                PlayerData.warnMissing(server.logger(), serverRoot, playerDataBases);
             }
             // 이 백업으로 인벤토리를 되돌릴 수 있는지 메타데이터에 남긴다. 복원할 때가 되어서야
             // 알게 되면 늦는다. 목록과 복원 확인창에서 미리 보여 줄 수 있어야 한다.
@@ -282,7 +277,7 @@ public final class BackupService {
                 if (Files.exists(path)) {
                     targets.add(path);
                 } else {
-                    plugin.getLogger().warning("[백업] server-files 파일이 없어 건너뜁니다: " + relative);
+                    server.logger().warning("[백업] server-files 파일이 없어 건너뜁니다: " + relative);
                 }
             }
             for (String relative : settings.extraPaths()) {
@@ -290,7 +285,7 @@ public final class BackupService {
                 if (Files.exists(path)) {
                     targets.add(path);
                 } else {
-                    plugin.getLogger().warning("[백업] extra-paths 경로를 찾을 수 없습니다: " + relative);
+                    server.logger().warning("[백업] extra-paths 경로를 찾을 수 없습니다: " + relative);
                 }
             }
             if (targets.isEmpty()) {
@@ -302,7 +297,7 @@ public final class BackupService {
             if (merged.size() != targets.size()) {
                 for (Path dropped : targets) {
                     if (merged.contains(dropped)) continue;
-                    plugin.getLogger().warning("[백업] 다른 백업 대상에 이미 포함되어 있어 건너뜁니다: "
+                    server.logger().warning("[백업] 다른 백업 대상에 이미 포함되어 있어 건너뜁니다: "
                             + FileUtil.relativize(serverRoot, dropped));
                 }
                 targets = merged;
@@ -347,19 +342,19 @@ public final class BackupService {
                     (fileCount, originalBytes) -> repo.toYamlString(new BackupEntry(
                             backupId, archivePath, created, type, cleanLabel,
                             0L, originalBytes, fileCount, finalRoots, finalWorlds, finalExcludes,
-                            Bukkit.getBukkitVersion(), false, true, baseBackupId, hasPlayerData)),
+                            server.serverVersion(), false, true, baseBackupId, hasPlayerData)),
                     text -> {
                         progressText = text;
-                        plugin.getLogger().info("[백업] 진행률 " + text);
+                        server.logger().info("[백업] 진행률 " + text);
                     },
-                    plugin.getLogger()
+                    server.logger()
             );
             // 여기까지 왔으면 zip 은 정상적으로 닫히고 최종 이름까지 받았다.
             archived = true;
 
             BackupEntry entry = new BackupEntry(backupId, archivePath, created, type, cleanLabel,
                     result.archiveBytes(), result.originalBytes(), result.fileCount(),
-                    finalRoots, finalWorlds, finalExcludes, Bukkit.getBukkitVersion(),
+                    finalRoots, finalWorlds, finalExcludes, server.serverVersion(),
                     false, true, baseBackupId, hasPlayerData);
             repo.writeMeta(entry);
             lastBackup = entry;
@@ -380,20 +375,20 @@ public final class BackupService {
             if (settings.broadcast()) {
                 broadcastSafe(summary, settings.broadcastPermission());
             } else {
-                plugin.getLogger().info("[백업] 완료: " + backupId + " (" + FileUtil.humanBytes(result.archiveBytes())
+                server.logger().info("[백업] 완료: " + backupId + " (" + FileUtil.humanBytes(result.archiveBytes())
                         + ", " + FileUtil.humanMillis(elapsed) + ")");
             }
             if (base != null) {
                 int reused = result.fileCount() - result.storedCount();
-                plugin.getLogger().info("[백업] 차등 백업 (기준 " + base.id() + ") - 저장 "
+                server.logger().info("[백업] 차등 백업 (기준 " + base.id() + ") - 저장 "
                         + result.storedCount() + "개 " + FileUtil.humanBytes(result.storedBytes())
                         + " / 재사용 " + reused + "개");
             }
             if (result.skippedCount() > 0) {
-                plugin.getLogger().warning("[백업] 읽지 못해 건너뛴 파일 " + result.skippedCount() + "개");
+                server.logger().warning("[백업] 읽지 못해 건너뛴 파일 " + result.skippedCount() + "개");
             }
             if (initiator != null) {
-                plugin.getLogger().info("[백업] 요청자: " + initiator.getName());
+                server.logger().info("[백업] 요청자: " + initiator.getName());
             }
 
             pruneAfterBackup(settings, repo);
@@ -410,7 +405,7 @@ public final class BackupService {
                 } catch (IOException ignored) {
                 }
             }
-            plugin.getLogger().log(Level.SEVERE, "[백업] 실패: " + t.getMessage(), t);
+            server.logger().log(Level.SEVERE, "[백업] 실패: " + t.getMessage(), t);
             if (settings.broadcast()) {
                 broadcastSafe("<red>백업에 실패했습니다. 콘솔 로그를 확인하세요.</red>", settings.broadcastPermission());
             }
@@ -437,15 +432,15 @@ public final class BackupService {
      * </ul>
      */
     private void pruneAfterBackup(BackupSettings settings, BackupRepository repo) {
-        if (plugin.restoreFailureHold()) {
-            plugin.getLogger().warning("[백업] 복원 실패 기록이 있어 이번 백업 뒤 보관 정리는 건너뜁니다. "
+        if (server.restoreFailureHold()) {
+            server.logger().warning("[백업] 복원 실패 기록이 있어 이번 백업 뒤 보관 정리는 건너뜁니다. "
                     + "(월드를 확인한 뒤 표식을 지우고 /wb reload 하세요)");
             return;
         }
         try {
             repo.prune(settings);
         } catch (Exception e) {
-            plugin.getLogger().log(Level.WARNING, "[백업] 백업은 끝났지만 보관 정리에 실패했습니다.", e);
+            server.logger().log(Level.WARNING, "[백업] 백업은 끝났지만 보관 정리에 실패했습니다.", e);
         }
     }
 
@@ -467,7 +462,7 @@ public final class BackupService {
      */
     private BackupEntry chooseBase(BackupSettings settings, BackupRepository repo) {
         if (forceFullBackup.get()) {
-            plugin.getLogger().info("[백업] 기준을 새로 잡기 위해 이번에는 전체 백업을 만듭니다.");
+            server.logger().info("[백업] 기준을 새로 잡기 위해 이번에는 전체 백업을 만듭니다.");
             return null;
         }
         List<BackupEntry> all = repo.list();
@@ -477,11 +472,11 @@ public final class BackupService {
                 .findFirst()
                 .orElse(null);
         if (base == null) {
-            plugin.getLogger().info("[백업] 기준이 될 전체 백업이 없어 이번에는 전체 백업을 만듭니다.");
+            server.logger().info("[백업] 기준이 될 전체 백업이 없어 이번에는 전체 백업을 만듭니다.");
             return null;
         }
         if (settings.fullEvery() > 0 && repo.dependents(all, base.id()).size() >= settings.fullEvery()) {
-            plugin.getLogger().info("[백업] 차등 백업이 " + settings.fullEvery()
+            server.logger().info("[백업] 차등 백업이 " + settings.fullEvery()
                     + "개를 채워 전체 백업을 새로 만듭니다.");
             return null;
         }
@@ -496,32 +491,32 @@ public final class BackupService {
         // 스냅샷 경계는 바로 여기다. 이 시점 이후의 변경은 다음 백업이 담당하므로 플래그를 내린다.
         // 압축이 끝난 뒤에 내리면, 압축 중(대형 월드에서는 수 분)에 생긴 변경이 "변경 없음"으로
         // 묻혀 다음 주기가 통째로 건너뛰어진다. 접속자가 있으면 계속 변하는 중이므로 유지한다.
-        worldChanged.set(!Bukkit.getOnlinePlayers().isEmpty());
-        Bukkit.savePlayers();
+        worldChanged.set(server.hasOnlinePlayers());
+        server.savePlayers();
 
         List<WorldRef> refs = new ArrayList<>();
         long flushStart = System.currentTimeMillis();
-        for (World world : Bukkit.getWorlds()) {
-            if (!settings.includesWorld(world.getName())) continue;
-            frozenWorlds.putIfAbsent(world.getName(), world.isAutoSave());
-            world.setAutoSave(false);
+        for (ServerBridge.WorldHandle world : server.worlds()) {
+            if (!settings.includesWorld(world.name())) continue;
+            // 원래 값을 먼저 적어 둔다. 아래 저장이 예외로 끝나도 원복할 재료가 남아야 한다.
+            frozenWorlds.putIfAbsent(world.name(), world.autoSave());
+            world.autoSave(false);
             try {
-                // save(true) 여야 한다. 인자 없는 save() 는 save(false) 이고, 그건 청크 쓰기를
-                // 예약만 하고 즉시 돌아온다. 그 상태로 압축을 시작하면 서버의 I/O 스레드가
-                // 아직 쓰고 있는 region 파일을 읽게 되어, 헤더와 데이터가 어긋난 조각이
-                // 백업에 담긴다. 복원해 보면 "Corrupt regionfile header" 가 뜨고 복구되지 않은
-                // 청크는 통째로 재생성된다. 압축이 시작되기 전에 디스크 쓰기가 끝나야 한다.
-                world.save(true);
+                // 청크 쓰기가 디스크에 끝날 때까지 기다린다. 기다리지 않으면 서버가 아직 쓰고
+                // 있는 region 파일을 압축하게 되어, 헤더와 데이터가 어긋난 조각이 백업에 담긴다.
+                // 복원해 보면 "Corrupt regionfile header" 가 뜨고 복구되지 않은 청크는 통째로
+                // 재생성된다. 압축이 시작되기 전에 디스크 쓰기가 끝나야 한다.
+                world.saveNow();
             } catch (Exception e) {
-                plugin.getLogger().log(Level.WARNING, "[백업] 월드 저장 실패: " + world.getName(), e);
+                server.logger().log(Level.WARNING, "[백업] 월드 저장 실패: " + world.name(), e);
             }
-            refs.add(new WorldRef(world.getName(), world.getWorldPath().toAbsolutePath().normalize()));
+            refs.add(new WorldRef(world.name(), world.folder()));
         }
 
         long flushed = System.currentTimeMillis() - flushStart;
         if (flushed > 1000L) {
             // 이 시간만큼 서버가 멈춘다. 관리자가 원인을 알 수 있게 남긴다.
-            plugin.getLogger().info("[백업] 청크 저장이 끝나기를 기다렸습니다: " + FileUtil.humanMillis(flushed));
+            server.logger().info("[백업] 청크 저장이 끝나기를 기다렸습니다: " + FileUtil.humanMillis(flushed));
         }
         return refs;
     }
@@ -536,12 +531,12 @@ public final class BackupService {
                 return null;
             });
         } catch (Exception e) {
-            plugin.getLogger().log(Level.SEVERE,
+            server.logger().log(Level.SEVERE,
                     "[백업] 월드 자동 저장 복구가 지연되고 있습니다. 스케줄러로 재시도합니다.", e);
             // 마지막 방어선: 결과를 기다리지 않고 메인 스레드에 밀어 넣는다.
             // 이마저 실패해도 주기적인 thawLeftovers() 점검이 다시 시도한다.
             frozenWorlds.putAll(snapshot);
-            Sched.syncQuietly(plugin, () -> restoreAutoSave(drainFrozen()));
+            server.runSyncQuietly(() -> restoreAutoSave(drainFrozen()));
         }
     }
 
@@ -554,10 +549,10 @@ public final class BackupService {
 
     private void restoreAutoSave(Map<String, Boolean> snapshot) {
         for (Map.Entry<String, Boolean> saved : snapshot.entrySet()) {
-            World world = Bukkit.getWorld(saved.getKey());
-            if (world == null) continue;
-            if (world.isAutoSave() != saved.getValue()) {
-                world.setAutoSave(saved.getValue());
+            ServerBridge.WorldHandle world = server.world(saved.getKey()).orElse(null);
+            if (world == null) continue; // 그 사이 언로드됐다
+            if (world.autoSave() != saved.getValue()) {
+                world.autoSave(saved.getValue());
             }
         }
     }
@@ -571,13 +566,13 @@ public final class BackupService {
 
         // 복원 실패 정지 중에는 공간을 만들겠다고 옛 백업을 지우면 안 된다. 그 백업들이
         // 반쯤 복원된 월드를 되돌릴 유일한 재료다. 이번 백업을 포기하는 쪽이 훨씬 싸다.
-        if (plugin.restoreFailureHold()) {
+        if (server.restoreFailureHold()) {
             throw new IllegalStateException("디스크 여유 공간이 부족합니다. 필요: "
                     + FileUtil.humanBytes(required) + ", 남음: " + FileUtil.humanBytes(free)
                     + " (복원 실패 기록이 있어 오래된 백업을 지우지 않습니다)");
         }
 
-        plugin.getLogger().warning("[백업] 디스크 여유 공간 부족 (" + FileUtil.humanBytes(free)
+        server.logger().warning("[백업] 디스크 여유 공간 부족 (" + FileUtil.humanBytes(free)
                 + " < " + FileUtil.humanBytes(required) + "). 오래된 백업을 정리합니다.");
         repo.prune(settings);
         repo.freeUpSpace(settings, required - free);
@@ -591,15 +586,10 @@ public final class BackupService {
 
     /** 온라인 플레이어 목록 접근은 메인 스레드에서 하도록 보장한다. */
     private void broadcastSafe(String message, String permission) {
-        runSyncQuietly(() -> Msg.broadcast(message, permission));
-    }
-
-    /** 결과가 필요 없는 메인 스레드 작업. 서버가 종료 중이면 조용히 포기한다. */
-    private void runSyncQuietly(Runnable task) {
-        Sched.syncQuietly(plugin, task);
+        server.runSyncQuietly(() -> server.broadcast(message, permission));
     }
 
     private <T> T callSync(Callable<T> callable) throws Exception {
-        return Sched.callSync(plugin, callable, SYNC_TIMEOUT_SECONDS);
+        return server.callSync(callable, SYNC_TIMEOUT_SECONDS);
     }
 }

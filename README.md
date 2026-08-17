@@ -529,7 +529,19 @@ retention:
 
 - `BackupRestoreRoundTripTest` — 백업 → 지형 삭제/인벤토리 초기화/파일 추가(테러 재현) → 복원 → 원상복구 검증,
   중단된 복원의 무한 루프 방지, zip slip 방어, 차등 백업의 스냅샷 정확성(삭제된 파일·빈 폴더가 되살아나지 않는지)
+- `BackupServiceTest` — 백업의 **실패·정지 경로**. 복원 실패 정지 중에는 보관 정리도 공간 확보도 하지 않는지,
+  압축이 끝난 백업을 뒷정리 실패로 지우지 않는지, 어떤 경로로 실패해도 자동 저장이 원복되는지
 - `BackupRetentionTest` — 보관 정책. 나이/개수 상한, `keep-daily`, 수동 백업 보호와 `max-protected` 상한,
-  `/wb lock` 의 절대 보호, 차등본이 살아 있는 기준 백업 보존, 남은 임시 파일 정리
+  `/wb lock` 의 절대 보호, 차등본이 살아 있는 기준 백업 보존, 총 용량 상한, 공간 확보의 최소 개수 하한,
+  남은 임시 파일 정리
+- `RetentionTiersTest` — 계단식 보관의 구간 나누기. 대표 선정(전체 백업 우선·손상 제외), 미래 시각 백업, 이력의 공백
+- `PlayerDataTest` — 인벤토리 폴더 탐색. `players`/`playerdata` 양쪽 배치, 플러그인 폴더 오탐 방지
+- `WorldLayoutTest` — 차원 폴더에서 진짜 월드 폴더로 올라가기
 - `GlobMatcherTest` — 제외/보존 패턴 매칭 (윈도우 `\` 경로 포함)
-- `FileUtilTest` — 겹치는 백업 대상 병합, 상대 경로 변환
+- `FileUtilTest` — 겹치는 백업 대상 병합, 상대 경로 변환, 차등 백업의 변경분 용량 측정
+- `TimeTokenTest` — `9h`·`03:00`·절대 시각 해석
+
+> 서버 인스턴스가 필요한 부분은 [`ServerBridge`](src/main/java/io/github/yj/worldbackup/backup/ServerBridge.java)
+> 하나로 모아 두었습니다. `BackupService` 는 이 인터페이스만 보고 돌기 때문에, 지우고 되돌리는 판단을
+> Paper 없이 검증할 수 있습니다. 실서버 구현은
+> [`PaperServerBridge`](src/main/java/io/github/yj/worldbackup/PaperServerBridge.java) 한 곳뿐입니다.

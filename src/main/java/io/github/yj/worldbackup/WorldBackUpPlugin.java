@@ -149,7 +149,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
             getLogger().log(Level.SEVERE, "백업 폴더를 만들지 못했습니다: " + settings.backupDir(), e);
         }
 
-        if (backupService == null) backupService = new BackupService(this);
+        if (backupService == null) backupService = new BackupService(new PaperServerBridge(this));
         if (restoreService == null) restoreService = new RestoreService(this);
 
         for (String warning : settings.tierWarnings()) {

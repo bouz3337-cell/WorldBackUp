@@ -29,8 +29,14 @@ import java.util.stream.Stream;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
-/** 백업 폴더를 읽고 쓰는 저장소. 메타데이터는 zip 옆의 .yml 파일에 둔다. */
-public final class BackupRepository {
+/**
+ * 백업 폴더를 읽고 쓰는 저장소. 메타데이터는 zip 옆의 .yml 파일에 둔다.
+ *
+ * <p>{@code final} 이 아닌 이유는 하나뿐이다 - 테스트가 {@link #prune(BackupSettings)} 이
+ * 터지는 상황을 만들어 "압축이 끝난 백업을 뒷정리 실패로 지우지 않는다"를 검증한다.
+ * 실서버에서 상속받아 쓰라는 뜻이 아니다.</p>
+ */
+public class BackupRepository {
 
     private final Path directory;
     private final Logger log;
