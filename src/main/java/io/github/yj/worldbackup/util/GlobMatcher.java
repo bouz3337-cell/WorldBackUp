@@ -56,7 +56,12 @@ public final class GlobMatcher {
         if (globs != null) {
             for (String glob : globs) {
                 if (glob == null || glob.isBlank()) continue;
-                String trimmed = glob.trim();
+                // 패턴도 경로와 <b>같은 구분자</b>로 맞춘다. {@link #matchesFile} 은 검사할 경로를
+                // '/' 로 바꾸는데 패턴은 그대로 두고 있어서, 윈도우 관리자가 자연스럽게 적은
+                // "world\region\**" 이 아무것도 걸러 내지 못했다. 그런데 조용히 통과한다 -
+                // 50GB 폴더를 뺐다고 믿는 쪽이 실제로는 그대로 담고 있는 것이다.
+                // (경로 쪽이 이미 정규화되므로, 정규화하지 않는 것이 오히려 어긋난 처리였다)
+                String trimmed = glob.trim().replace('\\', '/');
 
                 String directory = enclosingDirectory(trimmed);
                 if (directory != null) {

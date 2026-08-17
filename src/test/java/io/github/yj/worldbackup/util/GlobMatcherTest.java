@@ -27,6 +27,32 @@ class GlobMatcherTest {
         assertFalse(matcher.matchesDirectory("world/region"));
     }
 
+    /**
+     * <b>패턴</b>에 적힌 윈도우 구분자도 정규화된다.
+     *
+     * <p>검사할 경로만 정규화하고 패턴은 그대로 두면, 윈도우 관리자가 자연스럽게 적은
+     * {@code world\region\**} 이 아무것도 걸러 내지 못한다. 그런데 조용히 통과한다 -
+     * 50GB 폴더를 백업에서 뺐다고 믿는 쪽이 실제로는 그대로 담고 있는 것이다.</p>
+     */
+    @Test
+    void patternsWrittenWithWindowsSeparatorsAlsoWork() {
+        GlobMatcher backslash = new GlobMatcher(List.of("world\\region\\**"));
+        assertTrue(backslash.matchesFile("world/region/r.0.0.mca"));
+        assertTrue(backslash.matchesFile("world\\region\\r.0.0.mca"));
+        assertTrue(backslash.matchesDirectory("world/region"));
+        assertFalse(backslash.matchesFile("world/entities/r.0.0.mca"));
+
+        // 지름길(**/D/**)을 타는 꼴도 같아야 한다
+        GlobMatcher enclosing = new GlobMatcher(List.of("**\\logs\\**"));
+        assertTrue(enclosing.matchesFile("world/logs/latest.log"));
+        assertTrue(enclosing.matchesDirectory("world/logs"));
+
+        // 마지막 조각만 보는 지름길도
+        GlobMatcher tail = new GlobMatcher(List.of("**\\session.lock"));
+        assertTrue(tail.matchesFile("world/session.lock"));
+        assertFalse(tail.matchesFile("world/session.lock.bak"));
+    }
+
     @Test
     void singleStarDoesNotCrossDirectories() {
         GlobMatcher matcher = new GlobMatcher(List.of("plugins/*.jar"));
