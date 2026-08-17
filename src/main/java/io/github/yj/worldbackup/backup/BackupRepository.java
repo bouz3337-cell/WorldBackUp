@@ -8,8 +8,10 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
@@ -191,15 +193,15 @@ public class BackupRepository {
         Path metaFile = archive.getParent().resolve(BackupEntry.metaName(id));
         YamlConfiguration yaml = null;
         if (Files.isRegularFile(metaFile)) {
-            yaml = YamlConfiguration.loadConfiguration(metaFile.toFile());
-        } else {
-            yaml = readMetaFromArchive(archive).orElse(null);
+            yaml = usable(YamlConfiguration.loadConfiguration(metaFile.toFile()));
+        }
+        if (yaml == null) {
+            // 사이드카가 없거나 쓰다 만 것이다. 같은 내용이 zip 안에 한 벌 더 들어 있다.
+            yaml = readMetaFromArchive(archive).map(BackupRepository::usable).orElse(null);
             if (yaml != null) {
                 // 사이드카가 사라졌다면 복구해 둔다.
-                try {
-                    yaml.save(metaFile.toFile());
-                } catch (IOException ignored) {
-                }
+                writeAtomically(metaFile, yaml.saveToString(),
+                        "백업 메타데이터를 복구하지 못했습니다: " + id);
             }
         }
 
@@ -241,6 +243,59 @@ public class BackupRepository {
                 // 이 키가 없으면 기록하지 않던 시절의 백업이다. false 가 아니라 "모름" 이다.
                 yaml.contains("player-data") ? yaml.getBoolean("player-data") : null
         ));
+    }
+
+    /**
+     * 이 메타데이터를 믿어도 되는지.
+     *
+     * <p>{@link YamlConfiguration#loadConfiguration(java.io.File)} 은 파일이 깨져 있어도
+     * <b>예외를 던지지 않고 빈 설정</b>을 돌려준다. 그래서 쓰다 만 사이드카를 그대로 받아들이면
+     * {@code roots} 와 {@code base-id} 가 통째로 비어 있는데도 정상 백업으로 잡힌다. 차등 백업이
+     * 전체 백업으로 둔갑하고, 복원은 대상 경로를 좁히지 못한 채 "덮어쓰기만" 경로로 들어가
+     * 바뀐 파일 몇 개를 살아 있는 월드 위에 흩뿌린다. zip 자체는 멀쩡하므로
+     * {@code verify-archive} 도 이걸 잡지 못한다.</p>
+     *
+     * <p>그래서 <b>맨 끝에 쓰이는</b> 키가 있는지 본다. {@link #toYamlString} 은 삽입 순서대로
+     * 쓰므로, 뒤쪽 키가 있으면 그 앞의 {@code roots} 까지는 온전히 쓰인 것이다. 앞쪽 키
+     * ({@code id}, {@code created-at}) 로는 이 판단을 할 수 없다 - 그 둘은 첫 두 줄이라,
+     * 정작 위험한 "roots 부터 잘린" 파일이 그대로 통과한다.</p>
+     *
+     * <p>파수꾼은 {@code locked} 다. 값이 null 이면 키 자체가 안 쓰이므로 {@code label} ·
+     * {@code base-id} · {@code player-data} 는 쓸 수 없고(전체 백업은 {@code base-id} 가 없다),
+     * {@code locked} 는 boolean 이라 언제나 쓰인다. 최초 버전부터 그랬으므로 예전 백업의 멀쩡한
+     * 사이드카를 잘못 물리지도 않는다.</p>
+     *
+     * @return 쓸 수 있으면 그대로, 아니면 null
+     */
+    private static YamlConfiguration usable(YamlConfiguration yaml) {
+        if (yaml == null) return null;
+        return yaml.contains("id") && yaml.contains("locked") ? yaml : null;
+    }
+
+    /**
+     * 파일 내용을 통째로 갈아 끼운다. <b>쓰다 만 조각이 남지 않는다.</b>
+     *
+     * <p>{@code Files.writeString} 은 원자적이지 않아서, 서버가 하필 그 사이에 죽으면 잘린
+     * 파일이 남는다. 사이드카에 그 일이 벌어지면 {@link #usable} 이 막아 주기는 하지만,
+     * 애초에 그런 파일이 생기지 않게 하는 편이 낫다. {@link Archiver} 가 아카이브에 대해
+     * 지키는 규칙과 같다.</p>
+     */
+    private void writeAtomically(Path target, String text, String failureMessage) {
+        Path temp = target.resolveSibling(target.getFileName() + Archiver.TEMP_SUFFIX);
+        try {
+            Files.writeString(temp, text, StandardCharsets.UTF_8);
+            try {
+                Files.move(temp, target, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } catch (IOException e) {
+            log.log(Level.WARNING, failureMessage, e);
+            try {
+                Files.deleteIfExists(temp);
+            } catch (IOException ignored) {
+            }
+        }
     }
 
     private Optional<YamlConfiguration> readMetaFromArchive(Path archive) {
@@ -290,11 +345,8 @@ public class BackupRepository {
     }
 
     public void writeMeta(BackupEntry entry) {
-        try {
-            Files.writeString(entry.metaFile(), toYamlString(entry), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            log.log(Level.WARNING, "백업 메타데이터를 저장하지 못했습니다: " + entry.id(), e);
-        }
+        writeAtomically(entry.metaFile(), toYamlString(entry),
+                "백업 메타데이터를 저장하지 못했습니다: " + entry.id());
         invalidate();
     }
 
@@ -314,6 +366,16 @@ public class BackupRepository {
             log.log(Level.WARNING, "백업 보호 상태를 저장하지 못했습니다: " + entry.id(), e);
             invalidate(); // 마커가 일부만 남았을 수 있으니 다시 읽게 한다
             return false;
+        }
+
+        // 손상된 백업의 메타데이터는 파일 이름에서 <b>재구성한</b> 것이라 속이 비어 있다.
+        // 그걸 사이드카로 적어 버리면 다음 목록부터 "메타데이터가 정상적으로 읽힌 백업"으로
+        // 잡혀 [손상] 표시가 사라진다. 복원까지 허용되는데 정작 roots 도 base-id 도 없어서,
+        // 관리자가 남겨 두려고 잠근 행동이 오히려 위험한 백업을 하나 만들어 낸다.
+        // 마커 파일만으로 보호 상태는 충분히 남는다.
+        if (!entry.complete()) {
+            invalidate();
+            return true;
         }
         writeMeta(entry.withLocked(locked)); // 여기서 캐시가 버려진다
         return true;

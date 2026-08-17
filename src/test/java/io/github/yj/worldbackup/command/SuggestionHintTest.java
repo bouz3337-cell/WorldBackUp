@@ -70,7 +70,11 @@ class SuggestionHintTest {
     void latestFollowsTheCommandEvenWhenTheNewestIsBroken() throws Exception {
         BackupRepository repo = repository();
         put(repo, "healthy", minutesAgo(60), true);
-        Files.writeString(repo.directory().resolve(BackupEntry.archiveName("20260817-120000")),
+        // 메타를 못 읽는 백업의 시각은 파일 이름에서 나온다. 그러니 이름도 실제 시각으로 만들어야
+        // 한다. 예전에는 시각 하나를 박아 넣어서, 벽시계가 그 한 시간 안에 있을 때만 이 백업이
+        // 최신이 되었다 - 하루만 지나면 그냥 깨지는 테스트였다.
+        Files.writeString(
+                repo.directory().resolve(BackupEntry.archiveName(BackupEntry.newId(minutesAgo(10)))),
                 "메타를 읽을 수 없는 조각", StandardCharsets.UTF_8);
 
         List<BackupEntry> entries = repo.list();

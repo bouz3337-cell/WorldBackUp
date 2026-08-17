@@ -781,6 +781,17 @@ public final class WorldBackUpCommand {
     }
 
     private void setLocked(CommandSender sender, BackupEntry entry, boolean locked) {
+        // 손상된 백업은 어차피 보관 정책이 보호해 주지 않는다(BackupEntry#protectedFrom).
+        // 잠긴 것처럼 보여 놓고 다음 정리 때 사라지면, 남겨 뒀다고 믿은 쪽이 더 위험하다.
+        if (locked && !entry.complete()) {
+            Msg.send(sender, "<red>손상된 백업은 보호할 수 없습니다: <white>" + entry.id() + "</white></red>");
+            Msg.send(sender, entry.isDifferential()
+                    ? "<gray>기준이 되는 전체 백업이 없어 복원에 쓸 수 없습니다.</gray>"
+                    : "<gray>압축이 끝나기 전에 서버가 종료된 것으로 보입니다.</gray>");
+            Msg.send(sender, "<gray>되돌릴 수 있는 백업을 남기시려면 <white>/wb list</white> 에서 "
+                    + "<red>[손상]</red> 표시가 없는 것을 고르세요.</gray>");
+            return;
+        }
         if (!plugin.repository().setLocked(entry, locked)) {
             Msg.send(sender, "<red>보호 상태를 저장하지 못했습니다. 콘솔 로그를 확인하세요.</red>");
             return;

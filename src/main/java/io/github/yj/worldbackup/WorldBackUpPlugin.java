@@ -62,6 +62,17 @@ public final class WorldBackUpPlugin extends JavaPlugin {
     private volatile long playerDataCachedAt;
 
     /**
+     * 접속을 계기로 한 재탐색을 이미 써 버렸는지.
+     *
+     * <p>재탐색이 필요한 이유는 하나뿐이다 - 플레이어 데이터 폴더는 <b>첫 접속 때</b> 생긴다.
+     * 그런데 못 찾은 상태로 굳어 있으면 접속할 때마다 캐시가 풀려, 그 뒤의 {@code /wb status}
+     * 가 메인 스레드에서 서버 폴더를 다시 훑는다. 하필 문제가 있는 환경에서만, 그리고 사람이
+     * 몰리는 순간에 그렇게 된다. 한 번이면 충분하고, 그래도 못 찾았다면 폴더가 생겨서 될 일이
+     * 아니라 설정을 손봐야 하는 상황이므로 {@code /wb reload} 가 다시 열어 준다.</p>
+     */
+    private volatile boolean playerDataRescanUsed;
+
+    /**
      * 월드가 로드되기 <b>전</b>에 호출된다. 예약된 복원은 반드시 이 시점에 처리해야
      * region 파일이 잠기지 않은 상태에서 안전하게 교체할 수 있다.
      */
@@ -142,7 +153,15 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         Path serverRoot = resolveServerRoot();
         settings = BackupSettings.load(getConfig(), getDataFolder().toPath(), serverRoot);
 
-        repository = new BackupRepository(settings.backupDir(), getLogger());
+        // 저장 위치가 그대로면 저장소를 <b>재사용한다.</b> 새로 만들면 진행 중인 차등 백업이
+        // 걸어 둔 pin 이 옛 객체에 남는데, 백업 스레드는 그 옛 객체를 계속 붙잡고 있으므로
+        // 새 저장소에서 도는 보관 정리는 "고정된 백업이 없다"고 보고 기준 백업을 지워 버린다.
+        // 방금 만든 차등본이 태어나자마자 복원 불가가 되는, pin 이 막으려던 바로 그 상황이다.
+        // (위치가 바뀐 경우는 백업 스레드가 옛 폴더만 건드리므로 새로 만들어도 안전하다)
+        BackupRepository current = repository;
+        if (current == null || !current.directory().equals(settings.backupDir())) {
+            repository = new BackupRepository(settings.backupDir(), getLogger());
+        }
         try {
             repository.ensureDirectory();
         } catch (IOException e) {
@@ -157,6 +176,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         }
 
         playerDataCache = null; // 설정이 바뀌면 대상 월드도 바뀔 수 있다
+        playerDataRescanUsed = false; // 관리자가 경로를 고쳤을 수 있으니 재탐색을 다시 열어 준다
         checkRestoreFailureHold();
         startSchedule();
     }
@@ -330,11 +350,17 @@ public final class WorldBackUpPlugin extends JavaPlugin {
     /**
      * 첫 접속으로 플레이어 데이터 폴더가 막 생겼을 수 있다.
      *
-     * <p>못 찾은 상태였을 때만 캐시를 버린다. 이미 찾아 둔 경우에는 접속마다 다시 뒤질 이유가 없다.</p>
+     * <p>못 찾은 상태였을 때만, 그리고 <b>서버가 켜진 뒤 한 번만</b> 캐시를 버린다.
+     * 이미 찾아 둔 경우에는 접속마다 다시 뒤질 이유가 없고, 여전히 못 찾는 경우라면 폴더가
+     * 생겨서 해결될 일이 아니라 설정을 손봐야 하는 상황이다. 사람이 몰리는 순간마다 서버
+     * 폴더를 훑는 것이 그 진단에 도움이 되지도 않는다. 다시 열려면 {@code /wb reload}.</p>
      */
     public void refreshPlayerDataIfMissing() {
+        if (playerDataRescanUsed) return;
         PlayerData.Located cached = playerDataCache;
-        if (cached != null && !cached.inventory()) playerDataCache = null;
+        if (cached == null || cached.inventory()) return;
+        playerDataRescanUsed = true;
+        playerDataCache = null;
     }
 
     /**
