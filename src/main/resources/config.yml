@@ -67,8 +67,18 @@ backup:
   compression-level: 4
 
   # 백업 저장 폴더.
-  # 상대 경로면 plugins/WorldBackUp/ 기준, 절대 경로도 사용 가능합니다.
-  # 예) directory: "D:/minecraft-backups"  (다른 디스크 권장!)
+  # 상대 경로면 plugins/WorldBackUp/ 기준, 절대 경로면 그대로 씁니다.
+  #
+  #   directory: "backups"              -> plugins/WorldBackUp/backups/  (기본값)
+  #   directory: "../../worldbackups"   -> 서버폴더/worldbackups/        (plugins 밖)
+  #   directory: "D:/minecraft-backups" -> 그 경로 그대로               (다른 디스크·권장)
+  #
+  # plugins/ 밖에 두면 플러그인을 지우거나 다시 설치할 때 백업이 함께 날아가지 않고,
+  # plugins/ 를 통째로 다루는 호스팅 패널·동기화 스크립트에도 걸리지 않습니다.
+  # 어디에 두든 그 폴더는 백업 대상에서 자동으로 빠집니다(백업이 자기를 삼키지 않도록).
+  #
+  # ※ 값을 바꿔도 이미 만들어진 백업은 따라오지 않습니다. 옮기려면 서버를 끄고 zip·yml·locked
+  #   파일을 함께 새 폴더로 옮긴 뒤 /wb list 로 확인하세요.
   directory: "backups"
 
   # 백업 시작/완료를 채팅으로 알릴지 여부

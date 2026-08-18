@@ -226,7 +226,7 @@ restore:
 | `backup.full-every` | 24 | 차등본 N개마다 전체 백업 재생성 |
 | `backup.interval-minutes` | 30 | 자동 백업 주기(분) |
 | `backup.compression-level` | 4 | 0(빠름) ~ 9(최대 압축). 이미 압축된 형식(`.mca` 등)은 제외 — 아래 참고 |
-| `backup.directory` | `backups` | 상대 경로면 `plugins/WorldBackUp/` 기준. **다른 디스크 권장** |
+| `backup.directory` | `backups` | 상대 경로면 `plugins/WorldBackUp/` 기준, 절대 경로면 그대로. [아래 참고](#백업-폴더를-plugins-밖에-두기) |
 | `backup.skip-if-no-players` | true | 접속자·변경 없으면 자동 백업 생략 |
 | `backup.max-skipped-cycles` | 48 | 연속 생략 상한. 채우면 변경이 없어 보여도 한 번은 백업 |
 | `backup.on-shutdown` | false | 서버 종료 시 백업(종료가 느려짐) |
@@ -245,6 +245,31 @@ restore:
 | `restore.create-safety-backup` | true | 복원 직전 현재 상태 백업 |
 | `restore.verify-archive` | true | 복원 전 zip 무결성 검사 |
 | `restore.keep-replaced-max` | 3 | `replaced/` 스냅샷 보관 개수 |
+
+### 백업 폴더를 plugins 밖에 두기
+
+기본값은 `plugins/WorldBackUp/backups/` 입니다. 그 자리는 **플러그인을 지우거나 다시 설치할 때
+함께 날아가기 쉽고**, `plugins/` 를 통째로 다루는 호스팅 패널·동기화 스크립트에도 걸립니다.
+옮기고 싶다면 `backup.directory` 하나만 바꾸면 됩니다.
+
+| 값 | 실제 위치 |
+|---|---|
+| `"backups"` (기본값) | `plugins/WorldBackUp/backups/` |
+| `"../../worldbackups"` | **`서버폴더/worldbackups/`** (plugins 밖) |
+| `"D:/minecraft-backups"` | 그 경로 그대로 (**다른 디스크 — 가장 권장**) |
+
+상대 경로는 **`plugins/WorldBackUp/` 기준**이라 서버 폴더로 가려면 두 단계 올라갑니다.
+헷갈리면 절대 경로를 쓰세요. 어디에 두든:
+
+- 그 폴더는 **백업 대상에서 자동으로 빠집니다.** 서버 폴더 안에 두어도 백업이 자기 자신을
+  삼키지 않습니다. (기본 위치에 남아 있는 옛 아카이브도 계속 제외됩니다)
+- `/wb status` 의 `저장 위치` 에 실제 절대 경로가 표시되니 바꾼 뒤 확인하세요.
+- 디스크 여유·총 용량 상한은 그 폴더가 있는 파일시스템 기준으로 잽니다.
+
+> **이미 만들어진 백업은 따라오지 않습니다.** 값만 바꾸면 플러그인은 새 폴더를 보므로
+> `/wb list` 가 비어 보입니다. 옮기려면 서버를 끄고 `wb-*.zip` 과 짝이 되는 `wb-*.yml`,
+> `wb-*.locked` 를 **함께** 새 폴더로 옮긴 뒤 켜서 `/wb list` 로 확인하세요.
+> (`.yml` 을 빠뜨려도 zip 안에 사본이 있어 복구되지만, `.locked` 를 빠뜨리면 보호가 풀립니다)
 
 ### 차등 백업 (용량·시간 절감)
 

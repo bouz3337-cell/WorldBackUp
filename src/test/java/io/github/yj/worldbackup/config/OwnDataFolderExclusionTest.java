@@ -137,6 +137,48 @@ class OwnDataFolderExclusionTest {
                 "서버 폴더 밖의 경로에 대해 패턴을 만들어 두면 엉뚱한 경로를 걸러 낼 수 있다");
     }
 
+    /**
+     * 백업 폴더는 플러그인 폴더 밖에도 둘 수 있다.
+     *
+     * <p>기본값은 {@code plugins/WorldBackUp/backups/} 지만, 그 자리는 플러그인을 지우거나 다시
+     * 설치할 때 함께 날아가기 쉽고 호스팅 패널이 {@code plugins/} 를 통째로 다루기도 한다.
+     * 그래서 서버 폴더 쪽이나 아예 다른 디스크로 옮길 수 있어야 한다.</p>
+     *
+     * <p>규칙은 하나다 - <b>절대 경로면 그대로, 상대 경로면 플러그인 폴더 기준.</b> 그래서
+     * 서버 폴더에 두려면 {@code ../../} 로 올라가야 하는데, 이 기준이 직관적이지 않아 문서와
+     * 어긋나기 쉬우므로 여기서 못 박는다.</p>
+     */
+    @Test
+    void theArchiveFolderCanLiveOutsideThePluginFolder() {
+        Path serverRoot = tmp.resolve("server").toAbsolutePath().normalize();
+
+        assertEquals(serverRoot.resolve("plugins/WorldBackUp/backups"),
+                settings(cfg -> {
+                }).backupDir(),
+                "기본값은 플러그인 폴더 안이다");
+
+        assertEquals(serverRoot.resolve("worldbackups"),
+                settings(cfg -> cfg.set("backup.directory", "../../worldbackups")).backupDir(),
+                "상대 경로는 플러그인 폴더 기준이라 서버 폴더로 가려면 두 단계 올라간다");
+
+        Path otherDisk = tmp.resolve("other-disk/wb").toAbsolutePath().normalize();
+        assertEquals(otherDisk,
+                settings(cfg -> cfg.set("backup.directory", otherDisk.toString())).backupDir(),
+                "절대 경로는 그대로 쓴다 - 다른 물리 디스크에 두는 권장 구성이다");
+    }
+
+    /** 어디에 두든 <b>자기 자신은 백업하지 않는다.</b> 빠뜨리면 백업이 자기를 삼킨다. */
+    @Test
+    void theArchiveFolderIsExcludedWhereverItIs() {
+        assertTrue(exclude(cfg -> cfg.set("backup.directory", "../../worldbackups"))
+                .matchesFile("worldbackups/wb-20260818-030000.zip"));
+
+        // 서버 폴더 밖(다른 디스크)이면 애초에 백업 대상이 될 수 없으므로 패턴이 필요 없다.
+        Path otherDisk = tmp.resolve("other-disk/wb").toAbsolutePath().normalize();
+        assertFalse(settings(cfg -> cfg.set("backup.directory", otherDisk.toString()))
+                .excludePatterns().stream().anyMatch(p -> p.contains("other-disk")));
+    }
+
     // ------------------------------------------------------------------
 
     private GlobMatcher exclude(Consumer<YamlConfiguration> tweak) {
