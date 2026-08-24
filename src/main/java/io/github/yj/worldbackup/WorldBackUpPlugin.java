@@ -3,14 +3,19 @@ package io.github.yj.worldbackup;
 import io.github.yj.worldbackup.backup.BackupRepository;
 import io.github.yj.worldbackup.backup.BackupService;
 import io.github.yj.worldbackup.backup.BackupType;
+import io.github.yj.worldbackup.backup.OneBack;
 import io.github.yj.worldbackup.backup.PlayerData;
 import io.github.yj.worldbackup.backup.WorldLayout;
 import io.github.yj.worldbackup.command.WorldBackUpCommand;
 import io.github.yj.worldbackup.config.BackupSettings;
+import io.github.yj.worldbackup.config.ConfigMigrator;
 import io.github.yj.worldbackup.listener.ActivityListener;
 import io.github.yj.worldbackup.restore.PendingRestore;
 import io.github.yj.worldbackup.restore.RestoreApplier;
 import io.github.yj.worldbackup.restore.RestoreService;
+import io.github.yj.worldbackup.restore.UserListSync;
+import io.github.yj.worldbackup.restore.UserLists;
+import io.github.yj.worldbackup.update.UpdateService;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.Sched;
 import org.bukkit.World;
@@ -23,11 +28,16 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 import java.util.logging.Level;
 
 public final class WorldBackUpPlugin extends JavaPlugin {
@@ -39,6 +49,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
     private RestoreService restoreService;
     private ScheduledTask scheduleTask;
     private ScheduledTask watchdogTask;
+    private ScheduledTask oneBackTask;
 
     /**
      * 복원 실패 기록이 남아 있어 자동 작업을 멈춘 상태.
@@ -73,6 +84,16 @@ public final class WorldBackUpPlugin extends JavaPlugin {
     private volatile boolean playerDataRescanUsed;
 
     /**
+     * 이번 부팅의 복원이 되돌려 놓은, 서버가 이미 메모리에 올려 둔 목록 파일들.
+     *
+     * <p>{@code onLoad} 에서 채워 {@code onEnable} 에서 쓴다. 서버는 {@code ops.json} 같은
+     * 파일을 플러그인보다 <b>먼저</b> 읽으므로, 복원이 파일을 되돌려 놔도 이번 세션에는
+     * 아무것도 달라지지 않는다. 월드가 올라온 뒤에 서버 쪽 목록을 맞춰 넣어야 한다.
+     * 자세한 이유는 {@link UserLists}.</p>
+     */
+    private Set<String> restoredUserLists = Set.of();
+
+    /**
      * 월드가 로드되기 <b>전</b>에 호출된다. 예약된 복원은 반드시 이 시점에 처리해야
      * region 파일이 잠기지 않은 상태에서 안전하게 교체할 수 있다.
      */
@@ -81,7 +102,8 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         try {
             Path dataFolder = getDataFolder().toPath();
             if (Files.isDirectory(dataFolder)) {
-                RestoreApplier.applyIfPending(dataFolder, resolveServerRoot(), getLogger());
+                restoredUserLists = RestoreApplier.applyIfPending(
+                        dataFolder, resolveServerRoot(), getLogger());
             }
         } catch (Throwable t) {
             getLogger().log(Level.SEVERE, "복원 처리 중 예기치 못한 오류가 발생했습니다.", t);
@@ -90,7 +112,16 @@ public final class WorldBackUpPlugin extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        // 복원이 되돌린 op·화이트리스트·밴 목록을 <b>지금 돌고 있는 서버</b>에 반영한다.
+        // 다른 초기화보다 먼저 한다 - 이 뒤로 등록되는 명령어와 리스너가 곧바로 올바른
+        // 권한으로 판단해야 하고, 접속이 열리기 전에 밴/화이트리스트가 제자리에 있어야 한다.
+        applyRestoredUserLists();
+
         saveDefaultConfig();
+        // 새 버전에서 생긴 설정을 읽기 전에 채워 넣는다.
+        migrateConfig();
+        // 업데이트가 jar 교체로 이루어지므로, 옛 jar 가 함께 남아 있으면 여기서 잡는다.
+        warnAboutDuplicateJars();
         reloadPlugin();
 
         registerCommands();
@@ -100,6 +131,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         reportLastRestore();
         reportPlayerData();
         runStartupHousekeeping();
+        checkForUpdate();
 
         // 안전망: 백업이 돌지 않는데 자동 저장이 꺼진 월드가 남아 있으면 1분마다 되돌린다.
         watchdogTask = Sched.syncTimer(this, () -> backupService.thawLeftovers(), 20L * 60, 20L * 60);
@@ -125,6 +157,10 @@ public final class WorldBackUpPlugin extends JavaPlugin {
             watchdogTask.cancel();
             watchdogTask = null;
         }
+        if (oneBackTask != null) {
+            oneBackTask.cancel();
+            oneBackTask = null;
+        }
         if (restoreService != null) {
             restoreService.shutdownTasks();
         }
@@ -145,6 +181,118 @@ public final class WorldBackUpPlugin extends JavaPlugin {
             }
         }
         Sched.cancelAll(this);
+    }
+
+    /**
+     * 새 버전에서 생긴 설정을 기존 {@code config.yml} 에 <b>주석째</b> 끼워 넣는다.
+     *
+     * <p>{@code saveDefaultConfig()} 는 파일이 없을 때만 쓴다. 그래서 플러그인만 갈아 끼운
+     * 서버에서는 새 설정이 파일에 나타나지 않고, 관리자는 그런 설정이 생긴 줄도 모른다.
+     * 여기서 채워 넣으므로 업그레이드 뒤 파일을 열면 새 설정과 그 설명이 제자리에 있다.</p>
+     *
+     * <p>실패해도 시작을 막지 않는다. 설정이 파일에 없어도 코드 기본값으로 도는 데는
+     * 문제가 없으니, 여기서 서버를 세울 이유가 없다.</p>
+     */
+    private void migrateConfig() {
+        Path file = getDataFolder().toPath().resolve("config.yml");
+        try (InputStream shipped = getResource("config.yml")) {
+            if (shipped == null || !Files.isRegularFile(file)) return;
+
+            // 이미 깨져 있는 파일이면 손대지 않는다. 여기서 무언가를 끼워 넣으면 관리자가
+            // 고쳐야 할 자리가 늘어날 뿐이다.
+            String user = Files.readString(file, StandardCharsets.UTF_8);
+            new YamlConfiguration().loadFromString(user);
+
+            ConfigMigrator.Result result = ConfigMigrator.merge(
+                    new String(shipped.readAllBytes(), StandardCharsets.UTF_8), user);
+            if (!result.changed()) return;
+
+            // 합친 결과가 YAML 로 읽히지 않으면 관리자의 파일에 손대지 않는다.
+            new YamlConfiguration().loadFromString(result.text());
+
+            Path temp = file.resolveSibling("config.yml.tmp");
+            Files.writeString(temp, result.text(), StandardCharsets.UTF_8);
+            try {
+                Files.move(temp, file, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
+
+            announceMigration(result);
+        } catch (Exception e) {
+            getLogger().log(Level.WARNING,
+                    "config.yml 에 새 설정을 추가하지 못했습니다. 기본값으로 동작합니다.", e);
+        }
+    }
+
+    /**
+     * 업데이트가 설정 파일에 무엇을 했는지 알린다.
+     *
+     * <p>관리자는 jar 하나만 갈아 끼운다. 그래서 <b>콘솔의 이 몇 줄이 릴리스 노트다.</b>
+     * 특히 "새 기능이 파일에는 들어왔는데 꺼져 있다" 는 사실은 조용히 지나가면 안 된다 -
+     * 그러면 켤 수 있는 것이 있는 줄도 모른 채 몇 달이 지난다.</p>
+     */
+    private void announceMigration(ConfigMigrator.Result result) {
+        getLogger().info("==================================================================");
+        getLogger().info("[WorldBackUp] 업데이트된 버전으로 시작합니다. config.yml 에 새 설정을 넣었습니다.");
+        getLogger().info("[WorldBackUp]   " + String.join(", ", result.added()));
+        if (!result.guarded().isEmpty()) {
+            getLogger().info("[WorldBackUp]");
+            getLogger().info("[WorldBackUp] 이 중 아래는 <b>지금 동작을 그대로 두는 값</b>으로 넣었습니다."
+                    .replace("<b>", "").replace("</b>", ""));
+            for (String path : result.guarded()) {
+                getLogger().info("[WorldBackUp]   - " + path);
+            }
+            getLogger().info("[WorldBackUp] jar 를 바꾸는 것만으로 백업이 지워지거나 커지지 않게 하기 위함입니다.");
+            getLogger().info("[WorldBackUp] 쓰시려면 config.yml 의 해당 설명을 읽고 값을 바꾼 뒤 /wb reload 하세요.");
+        }
+        getLogger().info("==================================================================");
+    }
+
+    /**
+     * {@code plugins/} 에 이 플러그인의 jar 가 둘 이상 있으면 알린다.
+     *
+     * <p>업데이트는 jar 를 덮어쓰는 것으로 한다. 그런데 파일 이름에 버전이 들어 있어서,
+     * 새 jar 를 <b>넣기만</b> 하면 옛 jar 가 그대로 남는다. 그러면 같은 플러그인이 두 벌
+     * 올라가려 하고, 어느 쪽이 이길지는 서버가 폴더를 읽는 순서에 달렸다 - 업데이트한 줄
+     * 알았는데 옛 버전이 돌고 있을 수 있다. 여기서 잡지 않으면 그 사실을 알 방법이 없다.</p>
+     *
+     * <p>지우지는 않는다. 지금 돌고 있는 jar 는 서버가 열어 두었고, 무엇이 진짜 옛 버전인지는
+     * 파일 이름만으로 단정할 수 없다. 사람이 판단할 수 있게 이름만 늘어놓는다.</p>
+     */
+    private void warnAboutDuplicateJars() {
+        Path own;
+        try {
+            own = getFile().toPath().toAbsolutePath().normalize();
+        } catch (Throwable t) {
+            return; // jar 위치를 알 수 없으면 판단할 근거도 없다
+        }
+        Path folder = own.getParent();
+        if (folder == null || !Files.isDirectory(folder)) return;
+
+        List<Path> others = new ArrayList<>();
+        try (java.util.stream.Stream<Path> files = Files.list(folder)) {
+            files.filter(Files::isRegularFile)
+                    .filter(path -> {
+                        String name = path.getFileName().toString().toLowerCase(java.util.Locale.ROOT);
+                        return name.endsWith(".jar") && name.contains("worldbackup");
+                    })
+                    .filter(path -> !path.toAbsolutePath().normalize().equals(own))
+                    .forEach(others::add);
+        } catch (IOException e) {
+            return;
+        }
+        if (others.isEmpty()) return;
+
+        getLogger().severe("==================================================================");
+        getLogger().severe("[WorldBackUp] plugins 폴더에 WorldBackUp jar 가 " + (others.size() + 1) + "개 있습니다.");
+        getLogger().severe("[WorldBackUp]   지금 돌고 있는 것: " + own.getFileName());
+        for (Path other : others) {
+            getLogger().severe("[WorldBackUp]   그 외          : " + other.getFileName());
+        }
+        getLogger().severe("[WorldBackUp] 업데이트할 때 옛 jar 를 지우지 않으면 어느 쪽이 올라올지 알 수 없습니다.");
+        getLogger().severe("[WorldBackUp] 서버를 끄고 쓰지 않는 jar 를 지운 뒤 다시 켜세요.");
+        getLogger().severe("==================================================================");
     }
 
     /** config.yml 을 다시 읽고 스케줄러를 재구성한다. */
@@ -179,6 +327,25 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         playerDataRescanUsed = false; // 관리자가 경로를 고쳤을 수 있으니 재탐색을 다시 열어 준다
         checkRestoreFailureHold();
         startSchedule();
+        startOneBackSchedule();
+    }
+
+    /**
+     * 복원이 되돌린 op·화이트리스트·밴 목록을 지금 돌고 있는 서버에 반영한다.
+     *
+     * <p>여기서 실패해도 서버는 떠야 한다. 복원 직후는 되돌릴 수단이 가장 필요한 순간인데,
+     * 목록 하나 때문에 예외가 밖으로 나가면 백업 플러그인 자체가 꺼진 서버가 된다.</p>
+     */
+    private void applyRestoredUserLists() {
+        if (restoredUserLists.isEmpty()) return;
+        try {
+            UserListSync.apply(restoredUserLists, resolveServerRoot(), getLogger());
+        } catch (Throwable t) {
+            getLogger().log(Level.SEVERE, "[복원] 되돌린 목록을 서버에 반영하지 못했습니다. "
+                    + "파일은 되돌아가 있으니 서버를 한 번 더 재시작하면 적용됩니다.", t);
+        } finally {
+            restoredUserLists = Set.of(); // 한 번만 한다
+        }
     }
 
     /** 처리되지 않은 복원 실패 기록이 있으면 자동 작업을 멈춘다. */
@@ -218,6 +385,10 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         Sched.async(this, () -> {
             try {
                 repo.cleanupOrphans(); // .tmp 조각과 짝 잃은 사이드카만 지우므로 언제나 안전하다
+                // OneBack 조각은 서버 폴더 크기만 하다. 여기서 치우지 않으면 아무도 치우지 않는다.
+                if (snapshot.oneBackEnabled()) {
+                    OneBack.cleanupTemp(snapshot.oneBackDir(), getLogger());
+                }
                 if (restoreFailureHold) {
                     // replaced/ 에는 복원이 밀어낸 옛 월드가 들어 있다. 복원이 실패한 상황에서는
                     // 그게 유일한 복구 재료이므로 정리하지 않는다.
@@ -263,6 +434,33 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         } catch (Exception ignored) {
             // 종료 중이면 스케줄러가 거부한다.
         }
+    }
+
+    /**
+     * OneBack 자동 생성 주기를 건다. {@code interval-hours: 0} 이면 걸지 않는다.
+     *
+     * <p>기본값이 0 인 이유는 크기다 - 한 번에 서버 폴더 크기만큼 쓴다. 자동으로 도는 것이
+     * 기본이면, 디스크가 작은 서버에서 관리자가 알아채기 전에 차 버린다. 이 플러그인이 다른
+     * 곳에서 내내 경고하는 바로 그 상황이다.</p>
+     */
+    private void startOneBackSchedule() {
+        if (oneBackTask != null) {
+            oneBackTask.cancel();
+            oneBackTask = null;
+        }
+        BackupSettings snapshot = settings;
+        if (snapshot == null || !snapshot.oneBackEnabled() || snapshot.oneBackIntervalHours() <= 0) return;
+        if (restoreFailureHold) return;
+
+        long periodTicks = snapshot.oneBackIntervalHours() * 60L * 60L * 20L;
+        oneBackTask = Sched.syncTimer(this, () -> {
+            if (restoreService.isCountingDown()) return;
+            if (backupService.isRunning()) return; // 평소 백업이 도는 중이면 다음 주기에
+            backupService.startOneBackAsync("자동")
+                    .exceptionally(error -> null);
+        }, periodTicks, periodTicks);
+        getLogger().info("[OneBack] 자동 생성 " + snapshot.oneBackIntervalHours() + "시간 주기 · 저장 위치: "
+                + snapshot.oneBackDir());
     }
 
     private void startSchedule() {
@@ -418,6 +616,67 @@ public final class WorldBackUpPlugin extends JavaPlugin {
      */
     public static Path resolveServerRoot() {
         return Paths.get("").toAbsolutePath().normalize();
+    }
+
+    /**
+     * 새 버전이 있는지 시작할 때 한 번 확인한다.
+     *
+     * <p>이 플러그인은 jar 하나만 갈아 끼우면 업데이트된다. 그런데 <b>새 버전이 나온 줄
+     * 모르면</b> 그 편의가 소용없다 - 고쳐 놓은 결함을 그대로 안고 도는 서버가 된다.</p>
+     *
+     * <p>확인만 한다. {@code update.auto-download} 를 켠 서버에서만 실제로 내려받는다.
+     * 켜지 않은 서버에서 플러그인이 스스로 코드를 받아 오는 일은 없다.</p>
+     *
+     * <p><b>비동기</b>다. 깃허브가 늦게 답하는 동안 서버가 멈추면 안 된다. 그리고 실패는
+     * 조용히 넘긴다 - 인터넷이 없는 서버에서 부팅마다 빨간 줄이 뜰 이유가 없다.</p>
+     */
+    private void checkForUpdate() {
+        BackupSettings snapshot = settings;
+        if (snapshot == null || !snapshot.updateCheck()) return;
+
+        String current = getPluginMeta().getVersion();
+        try {
+            Sched.async(this, () -> {
+                UpdateService service = new UpdateService(snapshot.updateRepository(), "WorldBackUp");
+                UpdateService.Outcome outcome = snapshot.updateAutoDownload()
+                        ? service.download(current, updateFolder())
+                        : service.check(current);
+                announceUpdate(outcome, current);
+            });
+        } catch (Throwable ignored) {
+            // 스케줄러가 거부했다(종료 중). 업데이트 확인 때문에 시작을 흔들 이유는 없다.
+        }
+    }
+
+    private void announceUpdate(UpdateService.Outcome outcome, String current) {
+        if (outcome instanceof UpdateService.Outcome.Available available) {
+            getLogger().warning("==================================================================");
+            getLogger().warning("[WorldBackUp] 새 버전이 있습니다: " + current
+                    + " -> " + available.release().version());
+            getLogger().warning("[WorldBackUp] /wb update 를 치면 받아 두고, 다음 재시작에 적용됩니다.");
+            getLogger().warning("[WorldBackUp] " + available.release().pageUrl());
+            getLogger().warning("==================================================================");
+        } else if (outcome instanceof UpdateService.Outcome.Staged staged) {
+            getLogger().warning("==================================================================");
+            getLogger().warning("[WorldBackUp] 새 버전 " + staged.release().version() + " 을 받아 두었습니다.");
+            getLogger().warning("[WorldBackUp] 서버를 다시 켜면 자동으로 갈아 끼워집니다.");
+            getLogger().warning("[WorldBackUp] (update.auto-download 가 켜져 있습니다)");
+            getLogger().warning("==================================================================");
+        } else if (outcome instanceof UpdateService.Outcome.Failed failed) {
+            // 인터넷이 없는 서버가 흔하다. 부팅마다 경고를 띄울 일이 아니다.
+            getLogger().fine("[WorldBackUp] 업데이트 확인 실패: " + failed.reason());
+        }
+    }
+
+    /**
+     * 버킷이 다음 시작 때 {@code plugins/} 로 옮겨 주는 폴더.
+     *
+     * <p>새 jar 를 여기 놓는다. 돌고 있는 jar 를 그 자리에서 바꾸면 윈도우에서는 잠겨서
+     * 실패하고, 리눅스에서는 성공해도 이미 올라간 클래스는 그대로라 반쯤 새 버전인 서버가
+     * 된다. 이 폴더를 쓰면 옛 jar 가 함께 남는 문제까지 서버가 알아서 없애 준다.</p>
+     */
+    public Path updateFolder() {
+        return getServer().getUpdateFolderFile().toPath();
     }
 
     public BackupSettings settings() {

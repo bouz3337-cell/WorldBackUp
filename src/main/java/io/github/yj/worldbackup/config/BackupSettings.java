@@ -19,6 +19,21 @@ import java.util.Map;
 /** config.yml 을 읽어들인 불변 설정 스냅샷. */
 public final class BackupSettings {
 
+    /**
+     * 플러그인 폴더를 어디까지 담을지.
+     *
+     * <p>월드만 되돌리면 경제 잔고·보호구역·권한처럼 <b>플러그인이 들고 있는 상태</b>는 그대로
+     * 남아 월드와 어긋난다. 되돌린 시점에는 없던 상점 거래가 그대로 살아 있는 식이다.</p>
+     */
+    public enum Plugins {
+        /** 담지 않는다. */
+        NONE,
+        /** 설정과 데이터만. {@code plugins/} 바로 아래의 jar 는 뺀다. */
+        DATA,
+        /** jar 까지 전부. 서버를 통째로 잃었을 때 아카이브 하나로 되세울 수 있다. */
+        ALL
+    }
+
     // backup
     private final boolean enabled;
     private final boolean differential;
@@ -30,6 +45,19 @@ public final class BackupSettings {
     private final boolean skipIfNoPlayers;
     private final int maxSkippedCycles;
     private final int compressionLevel;
+    private final long flushSettleMillis;
+    /** OneBack - 서버 한 벌을 통째로 담은 아카이브. 이 폴더만 챙기면 아무 데서나 서버를 다시 연다. */
+    private final boolean oneBackEnabled;
+    private final Path oneBackDir;
+    private final int oneBackKeep;
+    private final int oneBackIntervalHours;
+    private final GlobMatcher oneBackExclude;
+
+    /** 새 버전 확인. jar 하나로 업데이트되는 플러그인이라, 새 버전이 나온 줄 아는 것이 중요하다. */
+    private final boolean updateCheck;
+    private final boolean updateAutoDownload;
+    private final String updateRepository;
+
     private final Path backupDir;
     private final boolean broadcast;
     private final String broadcastPermission;
@@ -38,6 +66,8 @@ public final class BackupSettings {
     private final List<String> worlds;
     private final List<String> serverFiles;
     private final List<String> extraPaths;
+    private final Plugins plugins;
+    private final Path pluginsDir;
     private final List<String> excludePatterns;
     private final GlobMatcher exclude;
 
@@ -75,6 +105,10 @@ public final class BackupSettings {
 
     /** {@code backup.directory} 의 기본값. 값을 옮겨도 옛 아카이브가 이 이름으로 남아 있다. */
     private static final String DEFAULT_ARCHIVE_FOLDER = "backups";
+    private static final String DEFAULT_ONEBACK_FOLDER = "OneBack";
+
+    /** plugin.yml 의 website 와 같은 곳을 가리켜야 한다. */
+    private static final String DEFAULT_REPOSITORY = "bouz3337-cell/WorldBackUp";
 
     /** {@link org.bukkit.plugin.java.JavaPlugin#saveDefaultConfig()} 가 만드는 파일 이름. */
     private static final String CONFIG_FILE_NAME = "config.yml";
@@ -94,6 +128,7 @@ public final class BackupSettings {
         this.skipIfNoPlayers = cfg.getBoolean("backup.skip-if-no-players", true);
         this.maxSkippedCycles = Math.max(0, cfg.getInt("backup.max-skipped-cycles", 48));
         this.compressionLevel = Math.min(9, Math.max(0, cfg.getInt("backup.compression-level", 4)));
+        this.flushSettleMillis = Math.max(0, cfg.getInt("backup.flush-settle-seconds", 3)) * 1000L;
         this.broadcast = cfg.getBoolean("backup.broadcast", true);
         this.broadcastPermission = cfg.getBoolean("backup.broadcast-permission-only", true)
                 ? "worldbackup.notify" : null;
@@ -109,12 +144,55 @@ public final class BackupSettings {
         this.serverFiles = List.copyOf(cfg.getStringList("targets.server-files"));
         this.extraPaths = List.copyOf(cfg.getStringList("targets.extra-paths"));
 
+        // plugins/ 그 자체. "plugins" 라는 이름을 여기 적지 않고 데이터 폴더의 부모를 쓴다 -
+        // --plugins 로 폴더를 옮긴 서버에서 엉뚱한 곳을 가리키지 않도록.
+        this.pluginsDir = dataFolder.toAbsolutePath().normalize().getParent();
+        this.plugins = readPlugins(cfg.getString("targets.plugins", "all"));
+
+        // OneBack - 서버 한 벌을 통째로 담는다. 상대 경로는 <b>서버 폴더</b> 기준이다.
+        // (백업 폴더는 plugins/WorldBackUp/ 기준인데, 이쪽은 서버 전체를 담는 것이라
+        //  "서버 폴더 옆에 둔다" 는 감각이 맞다)
+        this.oneBackEnabled = cfg.getBoolean("oneback.enabled", true);
+        String oneDir = cfg.getString("oneback.directory", DEFAULT_ONEBACK_FOLDER);
+        Path oneConfigured = Paths.get(oneDir == null || oneDir.isBlank()
+                ? DEFAULT_ONEBACK_FOLDER : oneDir);
+        this.oneBackDir = (oneConfigured.isAbsolute() ? oneConfigured : serverRoot.resolve(oneConfigured))
+                .toAbsolutePath().normalize();
+        this.oneBackKeep = Math.max(1, cfg.getInt("oneback.keep", 2));
+        this.oneBackIntervalHours = Math.max(0, cfg.getInt("oneback.interval-hours", 0));
+
+        this.updateCheck = cfg.getBoolean("update.check", true);
+        this.updateAutoDownload = cfg.getBoolean("update.auto-download", false);
+        String repo = cfg.getString("update.repository", DEFAULT_REPOSITORY);
+        this.updateRepository = repo == null || repo.isBlank() ? DEFAULT_REPOSITORY : repo.trim();
+
+        // 플러그인이 스스로 만들어 쓰는 것들과 백업 폴더. 백업에서도 빼고, 복원에서도 지키므로
+        // 따로 모아 둔다.
+        List<String> ownState = new ArrayList<>();
+        addOwnStateExclusions(ownState, serverRoot, dataFolder);
+        addSelfExclusion(ownState, serverRoot, backupDir);
+        // OneBack 파일 하나가 서버 폴더 크기만큼이다. 평소 백업이 이걸 삼키면 백업이 두 배가
+        // 되고, 그다음 OneBack 은 그 백업까지 삼킨다.
+        addSelfExclusion(ownState, serverRoot, oneBackDir);
+
         List<String> excludes = new ArrayList<>(cfg.getStringList("targets.exclude"));
-        // 플러그인이 스스로 만들어 쓰는 것들과 백업 폴더는 절대 백업하지 않는다.
-        addOwnStateExclusions(excludes, serverRoot, dataFolder);
-        addSelfExclusion(excludes, serverRoot, backupDir);
+        for (String pattern : ownState) addPattern(excludes, pattern);
+        if (plugins == Plugins.DATA) addPattern(excludes, pluginJarPattern(serverRoot, pluginsDir));
         this.excludePatterns = List.copyOf(excludes);
         this.exclude = new GlobMatcher(excludes);
+
+        // OneBack 은 서버 폴더를 통째로 담으므로 <b>평소 제외 패턴을 쓰지 않는다.</b>
+        // 그쪽은 "월드를 되돌리는 데 필요 없는 것" 을 빼는 목록이라, 그대로 쓰면 정작 서버를
+        // 다시 여는 데 필요한 것(plugins/*.jar, cache/)까지 빠진다. 대신 자기 자신과 평소
+        // 백업 폴더만은 반드시 빼야 한다 - 넣으면 아카이브가 아카이브를 삼킨다.
+        List<String> oneBackExcludes = new ArrayList<>(cfg.getStringList("oneback.exclude"));
+        addSelfExclusion(oneBackExcludes, serverRoot, oneBackDir);
+        addSelfExclusion(oneBackExcludes, serverRoot, backupDir);
+        addPattern(oneBackExcludes, "**/session.lock");
+        addPattern(oneBackExcludes, "**/*.mca.*.backup");
+        // 복원 예약·실패 표식·replaced 는 담기면 안 된다. 되살아나면 다음 부팅이 또 복원한다.
+        addOwnStateExclusions(oneBackExcludes, serverRoot, dataFolder);
+        this.oneBackExclude = new GlobMatcher(oneBackExcludes);
 
         this.tiers = readTiers(cfg);
         this.maxBackups = Math.max(0, cfg.getInt("retention.max-backups", 48));
@@ -137,8 +215,18 @@ public final class BackupSettings {
         this.keepReplacedMax = Math.max(0, cfg.getInt("restore.keep-replaced-max", 3));
         this.verifyArchive = cfg.getBoolean("restore.verify-archive", true);
         this.confirmTimeoutSeconds = Math.max(10, cfg.getInt("restore.confirm-timeout-seconds", 60));
-        List<String> preserveList = cfg.getStringList("restore.preserve");
-        if (preserveList.isEmpty()) preserveList = List.of("**/session.lock");
+        List<String> preserveList = new ArrayList<>(cfg.getStringList("restore.preserve"));
+        if (preserveList.isEmpty()) preserveList.add("**/session.lock");
+        // 설정과 무관하게 언제나. 이유는 pluginJarPattern 에 적어 두었다.
+        addPattern(preserveList, pluginJarPattern(serverRoot, pluginsDir));
+        // 우리 폴더도 <b>지금 설정 기준으로</b> 지킨다.
+        //
+        // 복원이 지키는 목록은 두 곳에서 온다 - 여기와, 그 백업을 만들 때 쓰인 제외 패턴이다
+        // ({@link io.github.yj.worldbackup.restore.RestoreService#restorePreserve}). 뒤쪽에는
+        // <b>그때의</b> 폴더 이름만 적혀 있다. backup.directory 를 바꾼 뒤 옛 백업을 복원하면
+        // 지금 백업 폴더는 어느 목록에도 없는데, plugins/ 가 복원 대상이 된 뒤로는 그 차이가
+        // 곧 "복원 한 번에 지금 백업이 전멸" 이다. 되돌리기를 취소할 방법까지 함께 사라진다.
+        for (String pattern : ownState) addPattern(preserveList, pattern);
         this.preservePatterns = List.copyOf(preserveList);
 
         warnIfDeepTiersMeetFullMode();
@@ -230,7 +318,46 @@ public final class BackupSettings {
     }
 
     private static void addPattern(List<String> excludes, String pattern) {
-        if (!excludes.contains(pattern)) excludes.add(pattern);
+        if (pattern != null && !excludes.contains(pattern)) excludes.add(pattern);
+    }
+
+    /**
+     * {@code targets.plugins} 를 읽는다. 알아듣지 못한 값은 담는 쪽으로 둔다.
+     *
+     * <p>오타 하나로 플러그인 데이터가 <b>조용히</b> 빠지는 것보다 예상보다 많이 담기는 편이
+     * 낫다. 전자는 되돌려야 하는 날에야 드러나고, 후자는 백업 크기로 바로 보인다.</p>
+     */
+    private static Plugins readPlugins(String value) {
+        String text = value == null ? "" : value.trim().toLowerCase(Locale.ROOT);
+        return switch (text) {
+            case "none", "false", "off", "no", "없음", "안함" -> Plugins.NONE;
+            case "data", "설정", "데이터" -> Plugins.DATA;
+            default -> Plugins.ALL;
+        };
+    }
+
+    /**
+     * {@code plugins/*.jar}. 플러그인 폴더가 서버 폴더 밖이면 null.
+     *
+     * <p>이 패턴은 두 곳에 쓰이는데 이유가 서로 다르다.</p>
+     * <ul>
+     *   <li>{@code plugins: data} 일 때의 <b>백업 제외</b>. jar 없이 설정만 담고 싶은 경우다.</li>
+     *   <li><b>복원 보존</b> - 이쪽은 설정과 무관하게 <b>언제나</b>다. 복원은 월드가 올라오기
+     *       전({@code onLoad})에 도는데, 그 시점에는 서버가 이미 모든 플러그인 jar 를 열어
+     *       둔 뒤다. 윈도우에서는 파일이 잠겨 실패하고, 리눅스에서는 성공하지만 이번 세션에는
+     *       아무 효과가 없다 - 대신 <b>다음 재시작에 조용히 옛 버전으로 돌아간다.</b> 게다가
+     *       사흘 전으로 되돌릴 때 원하는 것은 대개 "지금 코드 + 그때 데이터" 이지 사흘 전
+     *       버전의 플러그인이 아니다. 아카이브에는 계속 담기므로(서버를 통째로 잃었을 때 쓸
+     *       수 있게) 필요하면 zip 에서 직접 꺼내면 된다.</li>
+     * </ul>
+     *
+     * <p>{@code plugins/} <b>바로 아래</b>만 잡는다. 플러그인이 자기 폴더 안에 두는 라이브러리
+     * jar 는 그 플러그인의 데이터라서 함께 담고 함께 되돌려야 한다.</p>
+     */
+    private static String pluginJarPattern(Path serverRoot, Path pluginsDir) {
+        if (pluginsDir == null) return null;
+        String relative = FileUtil.relativize(serverRoot, pluginsDir);
+        return relative == null ? null : relative + "/*.jar";
     }
 
     /**
@@ -359,6 +486,38 @@ public final class BackupSettings {
 
     public int compressionLevel() { return compressionLevel; }
 
+    /**
+     * 예열한 쓰기가 디스크로 내려갈 시간을 얼마나 줄지. (0 = 예열하지 않음)
+     *
+     * <p>백업이 서버를 멈추는 이유는 청크를 직렬화하는 비용이 아니라 <b>큐가 빠지기를
+     * 기다리는 것</b>이다. 워치독 스레드 덤프에 {@code MoonriseRegionFileIO.partialFlush}
+     * 의 {@code linearLongBackoff} 로 찍히는 그 대기다. 그래서 기다리기 <b>전에</b> 쓰기를
+     * 걸어 두고, 서버가 정상적으로 도는 동안 I/O 스레드가 그것을 내려쓰게 둔다. 그동안
+     * 서버는 멈추지 않는다 - 이 시간은 백업 스레드가 잠들어 있을 뿐이다.</p>
+     *
+     * <p>그 뒤의 진짜 flush 는 그 사이에 새로 더러워진 청크만 기다리면 된다.</p>
+     */
+    public long flushSettleMillis() { return flushSettleMillis; }
+
+    public boolean oneBackEnabled() { return oneBackEnabled; }
+
+    /** OneBack 저장 폴더. 상대 경로는 <b>서버 폴더</b> 기준으로 이미 풀어 두었다. */
+    public Path oneBackDir() { return oneBackDir; }
+
+    public int oneBackKeep() { return oneBackKeep; }
+
+    /** 0 이면 자동으로 만들지 않는다({@code /wb oneback} 으로만). */
+    public int oneBackIntervalHours() { return oneBackIntervalHours; }
+
+    public GlobMatcher oneBackExclude() { return oneBackExclude; }
+
+    public boolean updateCheck() { return updateCheck; }
+
+    /** true 면 새 버전을 찾았을 때 사람 확인 없이 내려받아 다음 재시작에 적용한다. */
+    public boolean updateAutoDownload() { return updateAutoDownload; }
+
+    public String updateRepository() { return updateRepository; }
+
     public Path backupDir() { return backupDir; }
 
     public boolean broadcast() { return broadcast; }
@@ -368,6 +527,21 @@ public final class BackupSettings {
     public List<String> serverFiles() { return serverFiles; }
 
     public List<String> extraPaths() { return extraPaths; }
+
+    /**
+     * 플러그인 폴더를 어디까지 담을지.
+     *
+     * <p>월드만 되돌리면 플러그인이 들고 있는 상태는 그대로 남아 월드와 어긋난다.
+     * jar 는 담기더라도 복원이 덮어쓰지 않는다 - {@link #preservePatterns()}.</p>
+     */
+    public Plugins plugins() { return plugins; }
+
+    /**
+     * {@code plugins/} 폴더. 데이터 폴더의 부모라 {@code --plugins} 로 옮긴 서버에서도 맞다.
+     *
+     * <p>데이터 폴더가 파일시스템 루트에 바로 놓인 경우에만 null 이다.</p>
+     */
+    public Path pluginsDir() { return pluginsDir; }
 
     public List<String> excludePatterns() { return excludePatterns; }
 

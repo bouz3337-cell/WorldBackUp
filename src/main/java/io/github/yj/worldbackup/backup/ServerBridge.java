@@ -77,6 +77,20 @@ public interface ServerBridge {
         void autoSave(boolean value);
 
         /**
+         * 청크 쓰기를 <b>걸어만 두고 기다리지 않는다.</b> ({@code World#save(false)})
+         *
+         * <p>{@link #saveNow()} 가 오래 걸리는 이유는 직렬화가 아니라 <b>큐가 빠지기를
+         * 기다리는 것</b>이다(스레드 덤프에 {@code MoonriseRegionFileIO.partialFlush} 의
+         * {@code linearLongBackoff} 로 찍힌다). 그 기다림을 짧게 만드는 방법은 하나뿐이다 -
+         * 기다리기 전에 큐를 미리 비워 두는 것.</p>
+         *
+         * <p>그래서 백업은 두 번 저장한다. 먼저 이걸로 쓰기를 걸어 두고, 서버가 도는 동안
+         * I/O 스레드가 그것을 내려쓰게 둔 다음, 마지막에 {@link #saveNow()} 로 남은
+         * 것만 기다린다.</p>
+         */
+        void saveQueued();
+
+        /**
          * 청크 쓰기가 <b>디스크에 끝날 때까지 기다린다.</b> ({@code World#save(true)})
          *
          * <p>기다리지 않으면 서버의 I/O 스레드가 아직 쓰고 있는 region 파일을 압축하게 되어,

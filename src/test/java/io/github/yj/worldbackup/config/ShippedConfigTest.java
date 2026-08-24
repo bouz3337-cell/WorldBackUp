@@ -48,7 +48,7 @@ class ShippedConfigTest {
         YamlConfiguration cfg = load();
         assertFalse(cfg.getKeys(false).isEmpty(),
                 "YAML 이 깨지면 빈 설정이 된다. 그러면 새 서버가 전부 기본값으로 돌면서도 정상으로 보인다");
-        assertEquals(Set.of("backup", "targets", "retention", "restore"), cfg.getKeys(false));
+        assertEquals(Set.of("backup", "targets", "retention", "restore", "oneback", "update"), cfg.getKeys(false));
     }
 
     /** 문서(README 설정 요약)가 약속하는 기본값과 배포본이 같아야 한다. */
@@ -73,6 +73,9 @@ class ShippedConfigTest {
         assertEquals(10, settings.maxProtected());
         assertEquals(5L * 1024 * 1024 * 1024, settings.minFreeDiskBytes());
         assertEquals(0L, settings.maxTotalBytes(), "0 = 무제한");
+
+        assertEquals(BackupSettings.Plugins.ALL, settings.plugins(),
+                "플러그인 폴더는 기본으로 함께 담는다 - 월드만 되돌리면 상태가 어긋난다");
 
         assertTrue(settings.safetyBackup());
         assertTrue(settings.verifyArchive());

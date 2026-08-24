@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Enumeration;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Predicate;
@@ -88,9 +89,29 @@ public final class RestoreApplier {
         int restored;
         int failed;
         long restoredBytes;
+
+        /**
+         * 실제로 되돌려 놓은 {@link UserLists#NOTABLE} 파일들.
+         *
+         * <p>이 목록이 없으면 복원이 끝난 뒤 "op 파일을 건드렸는지" 를 알 방법이 없다.
+         * 매번 확인하면 복원하지 않은 서버에서도 서버가 들고 있는 목록을 파일로 되돌리게 되어,
+         * 복원과 무관한 부팅마다 op 목록을 흔들게 된다.</p>
+         */
+        final Set<String> notable = new LinkedHashSet<>();
     }
 
-    public static void applyIfPending(Path dataFolder, Path serverRoot, Logger log) {
+    /**
+     * 예약된 복원을 적용하고, 그중 <b>서버가 이미 메모리에 올려 둔 파일</b>이 무엇이었는지
+     * 돌려준다.
+     *
+     * <p>돌려주는 이유는 {@link UserLists} 에 적어 두었다. 요약하면 - {@code ops.json} 같은
+     * 파일은 여기서 되돌려 놔도 이번 세션에는 아무 효과가 없다. 서버가 이 시점보다 먼저 읽어
+     * 두었기 때문이다. 월드가 올라온 뒤({@code onEnable}) {@link UserListSync} 가 그 목록을
+     * 서버에 맞춰 넣어야 비로소 복원이 끝난다.</p>
+     *
+     * @return 되돌린 {@link UserLists#NOTABLE} 파일 이름들. 복원할 것이 없었으면 빈 집합.
+     */
+    public static Set<String> applyIfPending(Path dataFolder, Path serverRoot, Logger log) {
         Path marker = PendingRestore.file(dataFolder);
         Path processing = PendingRestore.processingFile(dataFolder);
 
@@ -106,23 +127,23 @@ public final class RestoreApplier {
             log.severe("[WorldBackUp] 서버를 끄고 " + failed.getFileName() + " 와 월드 폴더를 확인하세요.");
             log.severe("==================================================================");
             PendingRestore.clear(dataFolder);
-            return;
+            return Set.of();
         }
 
-        if (!Files.isRegularFile(marker)) return;
+        if (!Files.isRegularFile(marker)) return Set.of();
 
         try {
             Files.move(marker, processing, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
             log.log(Level.SEVERE, "[WorldBackUp] 복원 예약 파일을 처리하지 못했습니다.", e);
-            return;
+            return Set.of();
         }
 
         PendingRestore pending = PendingRestore.read(processing).orElse(null);
         if (pending == null) {
             log.severe("[WorldBackUp] 복원 예약 파일이 손상되어 복원을 취소합니다.");
             deleteQuietly(processing);
-            return;
+            return Set.of();
         }
 
         long startedAt = System.currentTimeMillis();
@@ -245,6 +266,11 @@ public final class RestoreApplier {
             writeFailureMarker(dataFolder, pending, error, log);
         }
         deleteQuietly(processing);
+
+        // 복원이 도중에 실패했더라도 <b>되돌려 놓은 파일은 알린다.</b> 그 파일이 디스크에
+        // 있는 이상 서버가 들고 있는 목록과 어긋나 있고, 어긋난 채로 두면 다음 /op 한 번에
+        // 그 파일이 덮어써진다. 실패했다는 사실과는 별개의 문제다.
+        return Set.copyOf(stats.notable);
     }
 
     /**
@@ -774,6 +800,9 @@ public final class RestoreApplier {
                     }
                     stats.restored++;
                     stats.restoredBytes += Math.max(0L, entry.getSize());
+                    // 서버가 이미 읽어 둔 파일을 되돌렸다면 기억해 둔다. 파일만 바꿔 놓는
+                    // 것으로는 이번 세션에 아무 효과가 없어서, 뒤에서 서버에 맞춰 넣어야 한다.
+                    if (UserLists.NOTABLE.contains(name)) stats.notable.add(name);
                 } catch (IOException e) {
                     stats.failed++;
                     log.warning("[WorldBackUp] 복원 실패: " + name + " (" + e.getMessage() + ")");

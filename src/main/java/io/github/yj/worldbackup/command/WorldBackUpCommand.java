@@ -12,6 +12,8 @@ import com.mojang.brigadier.suggestion.SuggestionsBuilder;
 import com.mojang.brigadier.tree.LiteralCommandNode;
 import io.github.yj.worldbackup.WorldBackUpPlugin;
 import io.github.yj.worldbackup.backup.BackupEntry;
+import io.github.yj.worldbackup.backup.OneBack;
+import io.github.yj.worldbackup.update.UpdateService;
 import io.github.yj.worldbackup.backup.BackupRepository;
 import io.github.yj.worldbackup.backup.BackupType;
 import io.github.yj.worldbackup.backup.RetentionTiers;
@@ -25,6 +27,7 @@ import io.papermc.paper.command.brigadier.Commands;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -82,6 +85,15 @@ public final class WorldBackUpCommand {
                         .then(Commands.argument("메모", StringArgumentType.greedyString())
                                 .executes(ctx -> run(ctx, sender ->
                                         backup(sender, StringArgumentType.getString(ctx, "메모"))))))
+
+                .then(Commands.literal("update")
+                        .requires(source -> has(source.getSender(), "worldbackup.reload"))
+                        .executes(ctx -> run(ctx, this::update)))
+
+                // 서버 한 벌을 통째로. 평소 백업과 목적이 달라 따로 둔다.
+                .then(Commands.literal("oneback")
+                        .requires(source -> has(source.getSender(), "worldbackup.backup"))
+                        .executes(ctx -> run(ctx, this::oneBack)))
 
                 .then(Commands.literal("list")
                         .executes(ctx -> run(ctx, sender -> list(sender, 1)))
@@ -379,6 +391,7 @@ public final class WorldBackUpCommand {
     private void help(CommandSender sender) {
         Msg.sendRaw(sender, "<dark_gray>─────────</dark_gray> <gradient:#5eead4:#38bdf8><bold>WorldBackUp</bold></gradient> <dark_gray>─────────</dark_gray>");
         line(sender, "/wb backup [메모]", "지금 즉시 백업합니다");
+        line(sender, "/wb oneback", "서버 한 벌을 통째로 담습니다 (다른 곳에서 다시 열 수 있게)");
         line(sender, "/wb list [페이지|날짜]", "백업 목록을 봅니다");
         line(sender, "/wb list days", "날짜별로 몇 개씩 있는지 봅니다");
         line(sender, "/wb info [ID|번호]", "백업 상세 정보를 봅니다");
@@ -392,6 +405,7 @@ public final class WorldBackUpCommand {
         line(sender, "/wb prune", "보관 정책을 지금 적용합니다");
         line(sender, "/wb status", "현재 상태를 봅니다");
         line(sender, "/wb reload", "설정을 다시 불러옵니다");
+        line(sender, "/wb update", "새 버전이 있는지 확인하고 받아 둡니다");
         Msg.sendRaw(sender, "<dark_gray>번호는 <white>/wb list</white> 의 <white>#숫자</white>, <white>latest</white> 도 사용할 수 있습니다.</dark_gray>");
     }
 
@@ -414,6 +428,115 @@ public final class WorldBackUpCommand {
                     }
                     Msg.send(sender, "<green>백업 완료</green> <white>" + entry.id() + "</white> <gray>("
                             + FileUtil.humanBytes(entry.archiveBytes()) + ", " + entry.fileCount() + "개 파일)</gray>");
+                }));
+    }
+
+    /**
+     * {@code /wb update} - 새 버전이 있는지 확인하고, 있으면 받아 둔다.
+     *
+     * <p>돌고 있는 jar 는 건드리지 않는다. {@code plugins/update/} 에 놓아 두면 서버가 다음에
+     * 켜질 때 스스로 갈아 끼운다 - 잠긴 파일도, 옛 jar 가 남는 문제도 없다.</p>
+     *
+     * <p>네트워크를 쓰므로 <b>반드시 비동기</b>다. 메인 스레드에서 깃허브를 기다리면 응답이
+     * 늦는 동안 서버 전체가 멈춘다.</p>
+     */
+    private void update(CommandSender sender) {
+        BackupSettings settings = plugin.settings();
+        String current = plugin.getPluginMeta().getVersion();
+
+        Msg.send(sender, "<gray>새 버전이 있는지 확인합니다... <white>(" + settings.updateRepository() + ")</white></gray>");
+        Sched.async(plugin, () -> {
+            UpdateService service = new UpdateService(settings.updateRepository(), "WorldBackUp");
+            UpdateService.Outcome outcome = service.download(current, plugin.updateFolder());
+            Sched.syncQuietly(plugin, () -> tell(sender, outcome, current));
+        });
+    }
+
+    /** 확인 결과를 사람에게 옮긴다. 콘솔과 채팅 양쪽에서 같은 말이 되도록 한 곳에 둔다. */
+    private void tell(CommandSender sender, UpdateService.Outcome outcome, String current) {
+        if (outcome instanceof UpdateService.Outcome.UpToDate) {
+            Msg.send(sender, "<green>이미 최신입니다.</green> <gray>(" + current + ")</gray>");
+        } else if (outcome instanceof UpdateService.Outcome.Staged staged) {
+            Msg.send(sender, "<green>새 버전 " + staged.release().version() + " 을 받았습니다.</green>");
+            Msg.send(sender, "<gray>서버를 다시 켜면 자동으로 갈아 끼워집니다. "
+                    + "지금 돌고 있는 " + current + " 은 그대로 둡니다.</gray>");
+        } else if (outcome instanceof UpdateService.Outcome.Available available) {
+            Msg.send(sender, "<yellow>새 버전 " + available.release().version() + " 이 있습니다.</yellow>");
+            Msg.send(sender, "<gray>내려받지 못했습니다. " + Msg.sanitize(String.valueOf(available.release().pageUrl()))
+                    + " 에서 직접 받으세요.</gray>");
+        } else if (outcome instanceof UpdateService.Outcome.Failed failed) {
+            Msg.send(sender, "<red>확인하지 못했습니다: " + Msg.sanitize(failed.reason()) + "</red>");
+        }
+    }
+
+    /**
+     * {@code /wb status} 의 OneBack 줄.
+     *
+     * <p>이것이 없으면 관리자는 <b>OneBack 이 있는지조차</b> 확인할 방법이 없다. 재해 복구용
+     * 파일에서 정작 알고 싶은 것은 "있느냐, 얼마나 오래됐느냐" 인데, 그걸 보려고 서버 폴더를
+     * 뒤져야 한다면 대개 보지 않는다. 그리고 필요한 날 없다는 것을 알게 된다.</p>
+     */
+    private void showOneBack(CommandSender sender, BackupSettings settings) {
+        if (!settings.oneBackEnabled()) return;
+
+        List<Path> archives = OneBack.list(settings.oneBackDir());
+        if (archives.isEmpty()) {
+            Msg.sendRaw(sender, " <gray>OneBack  :</gray> <yellow>아직 없음</yellow> <dark_gray>("
+                    + "<white>/wb oneback</white> 으로 서버 한 벌을 통째로 담아 둘 수 있습니다)</dark_gray>");
+            return;
+        }
+        String newest = OneBack.displayTime(archives.get(0)).orElse(archives.get(0).getFileName().toString());
+        Msg.sendRaw(sender, " <gray>OneBack  :</gray> <white>" + archives.size() + "개</white> <dark_gray>("
+                + FileUtil.humanBytes(OneBack.totalBytes(settings.oneBackDir())) + ")</dark_gray>"
+                + " <gray>최근</gray> <white>" + newest + "</white>");
+        Msg.sendRaw(sender, " <gray>         </gray> <dark_gray>" + settings.oneBackDir() + "</dark_gray>");
+    }
+
+    /**
+     * {@code /wb oneback} - 서버 한 벌을 통째로 담는다.
+     *
+     * <p>평소 백업과 크기가 다르다(서버 폴더 전체). 그래서 시작하기 전에 <b>무엇이 담기고
+     * 어디에 생기는지</b>를 먼저 알린다 - 몇 GB 짜리 작업을 아무 설명 없이 시작하면 관리자는
+     * 서버가 멈춘 줄 안다.</p>
+     */
+    private void oneBack(CommandSender sender) {
+        BackupSettings settings = plugin.settings();
+        if (!settings.oneBackEnabled()) {
+            Msg.send(sender, "<red>oneback.enabled 가 꺼져 있습니다.</red>");
+            Msg.send(sender, "<gray>config.yml 의 <white>oneback</white> 항목을 켜고 "
+                    + "<white>/wb reload</white> 하세요.</gray>");
+            return;
+        }
+        if (plugin.backupService().isRunning()) {
+            Msg.send(sender, "<red>이미 백업이 진행 중입니다. <gray>("
+                    + plugin.backupService().progressText() + ")</gray></red>");
+            return;
+        }
+        // 복원 카운트다운 중이면 곧 서버가 꺼진다. 그 자리에서 시작하면 서버 폴더 크기만 한
+        // 조각(.zip.tmp)만 남기고 끊긴다 - 몇 분을 쓰고 아무것도 얻지 못한다.
+        if (plugin.restoreService().isCountingDown()) {
+            Msg.send(sender, "<red>복원 카운트다운 중입니다. 곧 서버가 종료되므로 지금 시작하면 끊깁니다.</red>");
+            Msg.send(sender, "<gray>취소하려면 <white>/wb cancel</white>, 아니면 복원이 끝난 뒤에 실행하세요.</gray>");
+            return;
+        }
+
+        Msg.send(sender, "<gray>서버 폴더를 통째로 담습니다. 월드가 크면 몇 분 걸릴 수 있습니다.</gray>");
+        Msg.send(sender, "<gray>저장 위치: <white>" + settings.oneBackDir() + "</white></gray>");
+        plugin.backupService().startOneBackAsync(sender.getName())
+                .whenComplete((result, error) -> Sched.syncQuietly(plugin, () -> {
+                    if (error != null) {
+                        Msg.send(sender, "<red>OneBack 실패: "
+                                + Msg.sanitize(String.valueOf(error.getMessage())) + "</red>");
+                        return;
+                    }
+                    Msg.send(sender, "<green>OneBack 완료</green> <white>"
+                            + result.archive().getFileName() + "</white> <gray>("
+                            + FileUtil.humanBytes(result.archiveBytes()) + ", "
+                            + result.fileCount() + "개 파일, "
+                            + FileUtil.humanMillis(result.elapsedMillis()) + ")</gray>");
+                    Msg.send(sender, "<gray>이 폴더만 챙기면 다른 컴퓨터에서도 서버를 다시 열 수 있습니다. "
+                            + "폴더의 <white>" + io.github.yj.worldbackup.backup.OneBack.GUIDE_NAME
+                            + "</white> 에 방법이 적혀 있습니다.</gray>");
                 }));
     }
 
@@ -921,6 +1044,7 @@ public final class WorldBackUpCommand {
         Msg.sendRaw(sender, " <gray>저장 위치:</gray> <white>" + settings.backupDir() + "</white>");
         Msg.sendRaw(sender, " <gray>디스크   :</gray> <white>"
                 + FileUtil.humanBytes(FileUtil.usableSpace(settings.backupDir())) + " 남음</white>");
+        showOneBack(sender, settings);
         // 계단을 켜면 max-backups/max-age-days 는 동작하지 않는다. 그걸 그대로 보여 주면
         // 실제로 적용되지 않는 값을 보고 판단하게 된다.
         if (settings.tiers().isEmpty()) {

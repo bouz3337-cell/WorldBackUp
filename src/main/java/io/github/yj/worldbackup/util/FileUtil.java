@@ -254,6 +254,15 @@ public final class FileUtil {
             String text = path.toString();
             if (text.startsWith(rootText)) {
                 if (text.length() <= cut) return rootRelative;
+                // 접두사가 같다고 <b>그 폴더 안</b>인 것은 아니다. 뿌리가 "server/plugins" 일 때
+                // "server/plugins-old/x" 도 문자열로는 접두사가 맞아서, 잘라 붙이면
+                // "plugins/old/x" 라는 있지도 않은 경로가 나온다. 그 이름으로 zip 에 담기면
+                // 복원이 엉뚱한 자리에 쓴다.
+                //
+                // 지금은 walkFileTree 가 내놓는 뿌리 아래 경로만 들어오므로 그 상황이 오지
+                // 않는다. 그래도 막아 두는 이유는 실패가 조용하기 때문이다 - 예외도 경고도
+                // 없이 이름만 틀린 채로 백업이 성공한다.
+                if (!isSeparator(text.charAt(cut - 1))) return relativize(serverRoot, path);
                 String tail = text.substring(cut);
                 // ".." 가 섞인 경로는 이어 붙이기로 정리할 수 없다. 정규화하는 쪽에 맡긴다.
                 if (tail.indexOf("..") < 0) {
@@ -261,6 +270,11 @@ public final class FileUtil {
                 }
             }
             return relativize(serverRoot, path);
+        }
+
+        /** 윈도우는 두 구분자를 모두 받아들이므로 둘 다 본다. */
+        private static boolean isSeparator(char c) {
+            return c == '/' || c == '\\';
         }
     }
 

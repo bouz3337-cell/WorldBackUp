@@ -198,6 +198,43 @@ class BackupServiceTest {
 
     /** 백업 중에는 자동 저장이 꺼져 있고, 끝나면 원래 값으로 돌아온다. */
     @Test
+    void oneBackDoesNotStealTheChangedFlagFromTheOrdinaryBackup() throws Exception {
+        configure(cfg -> {
+            cfg.set("backup.skip-if-no-players", true);
+            cfg.set("backup.max-skipped-cycles", 0); // 하한 때문에 통과하는 것을 막는다
+            cfg.set("oneback.directory", tmp.resolve("OneBack").toString());
+        });
+        BackupService service = new BackupService(server);
+
+        // 접속자가 무언가 바꾸고 나갔다. 이 변경은 아직 어떤 백업에도 담기지 않았다.
+        server.online = false;
+        service.markWorldChanged();
+
+        service.startOneBackAsync("tester").join();
+
+        assertFalse(service.shouldSkipScheduled(),
+                "OneBack 은 /wb restore 목록에 오르지 않는다. 그것을 이유로 자동 백업을 건너뛰면 "
+                        + "그 사이의 변경은 되돌릴 방법이 없는 곳에만 남는다");
+    }
+
+    /** 반대로 평소 백업은 <b>복원 지점을 만들었으므로</b> 플래그를 내린다. 이쪽 동작은 그대로다. */
+    @Test
+    void anOrdinaryBackupStillClearsTheChangedFlag() throws Exception {
+        configure(cfg -> {
+            cfg.set("backup.skip-if-no-players", true);
+            cfg.set("backup.max-skipped-cycles", 0);
+        });
+        BackupService service = new BackupService(server);
+        server.online = false;
+        service.markWorldChanged();
+
+        service.runBlocking(BackupType.MANUAL, null, null);
+
+        assertTrue(service.shouldSkipScheduled(),
+                "복원 지점이 방금 만들어졌으니 다음 주기는 건너뛰어도 된다");
+    }
+
+    @Test
     void autoSaveIsOffWhileArchivingAndRestoredAfterwards() throws Exception {
         world.autoSave = true;
 
@@ -518,16 +555,167 @@ class BackupServiceTest {
         }
     }
 
-    /** 아무도 우리 폴더를 담지 않는 기본 설정에서는 설정 파일 하나를 대상으로 올린다. */
+    /**
+     * 아무도 우리 폴더를 담지 않으면 설정 파일 하나를 대상으로 올린다.
+     *
+     * <p>{@code targets.plugins} 를 꺼야 그 상황이 된다. 기본값처럼 켜져 있으면 플러그인
+     * 폴더가 이미 우리 폴더를 품고 있고, 그때는 아래
+     * {@link #theOwnConfigRidesAlongWithThePluginsFolder()} 쪽이 맞는 동작이다.</p>
+     */
     @Test
     void theOwnConfigBecomesItsOwnTargetWhenNothingElseCoversIt() throws Exception {
         Files.writeString(dataFolder.resolve("config.yml"), "backup: {}", StandardCharsets.UTF_8);
+        configure(cfg -> cfg.set("targets.plugins", "none"));
 
         BackupEntry entry = new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
 
         assertTrue(entry.roots().contains("plugins/WorldBackUp/config.yml"),
                 "복원이 이 파일을 되돌릴 수 있도록 대상 경로에도 올라야 한다");
         assertTrue(entryNames(entry).contains("plugins/WorldBackUp/config.yml"));
+    }
+
+    /**
+     * 기본값에서는 플러그인 폴더가 통째로 담기고, 우리 설정 파일도 그 안에 함께 실린다.
+     *
+     * <p>따로 대상으로 올리지 <b>않는</b> 것이 중요하다. 겹쳐 올리면 {@code dedupeTargets} 가
+     * 걸러 내면서 경고를 한 줄 남기는데, 관리자가 하지도 않은 설정을 지적하는 것처럼 보인다.</p>
+     */
+    @Test
+    void theOwnConfigRidesAlongWithThePluginsFolder() throws Exception {
+        Files.writeString(dataFolder.resolve("config.yml"), "backup: {}", StandardCharsets.UTF_8);
+        Files.writeString(serverRoot.resolve("plugins/Economy.jar"), "jar", StandardCharsets.UTF_8);
+        Files.createDirectories(serverRoot.resolve("plugins/Economy"));
+        Files.writeString(serverRoot.resolve("plugins/Economy/balances.yml"), "잔고", StandardCharsets.UTF_8);
+
+        BackupEntry entry = new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
+        List<String> names = entryNames(entry);
+
+        assertTrue(entry.roots().contains("plugins"));
+        assertFalse(entry.roots().contains("plugins/WorldBackUp/config.yml"),
+                "플러그인 폴더가 이미 품고 있으므로 따로 올리지 않는다");
+        assertTrue(names.contains("plugins/WorldBackUp/config.yml"));
+        assertTrue(names.contains("plugins/Economy/balances.yml"),
+                "월드만 되돌리면 플러그인이 든 상태가 월드와 어긋난다");
+        assertTrue(names.contains("plugins/Economy.jar"), "기본값(all)은 jar 까지 담는다");
+    }
+
+    /**
+     * {@code plugins: data} 는 설정과 데이터만 담고 jar 는 뺀다.
+     *
+     * <p>{@code plugins/} <b>바로 아래</b>만 뺀다. 플러그인이 자기 폴더 안에 두는 라이브러리
+     * jar 는 그 플러그인의 데이터라서 함께 담아야 한다.</p>
+     */
+    @Test
+    void pluginDataCanBeBackedUpWithoutTheJars() throws Exception {
+        Files.writeString(serverRoot.resolve("plugins/Economy.jar"), "jar", StandardCharsets.UTF_8);
+        Files.createDirectories(serverRoot.resolve("plugins/Economy/libs"));
+        Files.writeString(serverRoot.resolve("plugins/Economy/balances.yml"), "잔고", StandardCharsets.UTF_8);
+        Files.writeString(serverRoot.resolve("plugins/Economy/libs/driver.jar"), "라이브러리",
+                StandardCharsets.UTF_8);
+        configure(cfg -> cfg.set("targets.plugins", "data"));
+
+        List<String> names = entryNames(
+                new BackupService(server).runBlocking(BackupType.MANUAL, null, null));
+
+        assertTrue(names.contains("plugins/Economy/balances.yml"));
+        assertFalse(names.contains("plugins/Economy.jar"));
+        assertTrue(names.contains("plugins/Economy/libs/driver.jar"));
+    }
+
+    /**
+     * {@code plugins/} 아래를 가리키는 {@code extra-paths} 는 <b>조용히</b> 넘어간다.
+     *
+     * <p>targets.plugins 가 생기기 전에는 "plugins/LuckPerms" 를 거기 적는 것이 권장
+     * 설정이었다. 그대로 두면 dedupeTargets 가 걸러 내면서 백업할 때마다 경고를 한 줄
+     * 남긴다 - 30분 주기면 하루 48줄이고, 관리자가 하지도 않은 잘못을 지적하는 것처럼
+     * 보인다. 담기는 내용은 어느 쪽이든 같다.</p>
+     */
+    @Test
+    void anExtraPathInsideThePluginsFolderIsAbsorbedQuietly() throws Exception {
+        Files.createDirectories(serverRoot.resolve("plugins/Economy"));
+        Files.writeString(serverRoot.resolve("plugins/Economy/balances.yml"), "잔고",
+                StandardCharsets.UTF_8);
+        configure(cfg -> cfg.set("targets.extra-paths", List.of("plugins/Economy")));
+
+        BackupEntry entry = new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
+
+        assertTrue(entryNames(entry).contains("plugins/Economy/balances.yml"),
+                "조용히 넘어가되 내용은 그대로 담겨야 한다");
+        assertFalse(entry.roots().contains("plugins/Economy"),
+                "플러그인 폴더 하나로 합쳐진다");
+        assertTrue(server.warnings.stream().noneMatch(w -> w.contains("plugins/Economy")),
+                "이 겹침은 알릴 것이 아니다: " + server.warnings);
+    }
+
+    /**
+     * 청크 flush 는 월드마다 <b>따로</b> 메인 스레드에 올린다.
+     *
+     * <p>워치독은 틱 하나의 길이를 본다. 월드 셋을 한 틱에 몰아 저장하면 그 합이 한 틱이 되어,
+     * 월드마다 4초씩만 걸려도 12초짜리 틱이 되고 스레드 덤프가 찍힌다. 그 덤프에는 이 플러그인의
+     * 스택이 남으므로 관리자는 이쪽을 의심하게 되고, 합이 치명 임계에 닿으면 서버가 죽는다.</p>
+     */
+    @Test
+    void eachWorldIsFlushedInItsOwnTick() throws Exception {
+        FakeWorld nether = new FakeWorld("world_nether", serverRoot.resolve("world_nether"));
+        FakeWorld end = new FakeWorld("world_the_end", serverRoot.resolve("world_the_end"));
+        for (FakeWorld extra : List.of(nether, end)) {
+            Files.createDirectories(extra.folder.resolve("region"));
+            Files.writeString(extra.folder.resolve("level.dat"), "level", StandardCharsets.UTF_8);
+            server.worlds.add(extra);
+        }
+        server.syncTasks = 0;
+
+        new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
+
+        // 얼리기 1 + 월드 3 + 원복 1 = 5. (예열은 이 검사에서 꺼져 있다)
+        // 몰아서 저장하면 2가 된다.
+        assertEquals(5, server.syncTasks,
+                "월드마다 틱을 나누지 않으면 워치독이 보는 틱 하나가 그 합만큼 길어진다");
+        for (FakeWorld world : server.worlds) {
+            assertFalse(world.autoSaveWhileSaving,
+                    world.name + ": 자동 저장을 끈 뒤에 저장해야 한다");
+        }
+    }
+
+    /**
+     * 기다리는 저장 <b>전에</b> 기다리지 않는 저장을 먼저 건다.
+     *
+     * <p>백업이 서버를 멈추는 시간의 대부분은 청크를 만드는 비용이 아니라 큐가 빠지기를
+     * 기다리는 것이다. 순서가 뒤집히거나 예열이 빠지면 그 대기가 그대로 돌아온다.</p>
+     */
+    @Test
+    void writesArePreWarmedBeforeTheBlockingSave() throws Exception {
+        configure(cfg -> cfg.set("backup.flush-settle-seconds", 1));
+
+        new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
+
+        assertEquals(1, world.queuedSaves, "월드마다 한 번 예열해야 한다");
+        assertEquals(1, world.queuedBeforeSave,
+                "예열이 진짜 저장보다 먼저 걸려야 큐가 빠질 시간이 생긴다");
+    }
+
+    /** {@code flush-settle-seconds: 0} 이면 예열하지 않는다. 예전 동작 그대로. */
+    @Test
+    void preWarmingCanBeTurnedOff() throws Exception {
+        configure(cfg -> cfg.set("backup.flush-settle-seconds", 0));
+
+        new BackupService(server).runBlocking(BackupType.MANUAL, null, null);
+
+        assertEquals(0, world.queuedSaves);
+    }
+
+    /** {@code plugins: none} 이면 플러그인 폴더는 담지 않는다. */
+    @Test
+    void thePluginsFolderCanBeLeftOut() throws Exception {
+        Files.createDirectories(serverRoot.resolve("plugins/Economy"));
+        Files.writeString(serverRoot.resolve("plugins/Economy/balances.yml"), "잔고",
+                StandardCharsets.UTF_8);
+        configure(cfg -> cfg.set("targets.plugins", "none"));
+
+        List<String> names = entryNames(
+                new BackupService(server).runBlocking(BackupType.MANUAL, null, null));
+
+        assertFalse(names.contains("plugins/Economy/balances.yml"));
     }
 
     /**
@@ -564,6 +752,8 @@ class BackupServiceTest {
         YamlConfiguration cfg = new YamlConfiguration();
         cfg.set("backup.broadcast", false);
         cfg.set("backup.compression-level", 0); // 테스트를 빠르게
+        // 예열 대기는 진짜로 잠든다. 그것을 보는 검사만 따로 켠다.
+        cfg.set("backup.flush-settle-seconds", 0);
         cfg.set("targets.worlds", List.of("*"));
         cfg.set("targets.server-files", List.of());
         cfg.set("retention.max-backups", 0);
@@ -605,13 +795,35 @@ class BackupServiceTest {
     /** 서버를 건드리는 동작만 흉내 낸다. 판단은 하나도 들어 있지 않다. */
     private final class FakeServer implements ServerBridge {
 
-        private final Logger log = Logger.getLogger("BackupServiceTest");
+        /**
+         * 경고를 모아 둔다.
+         *
+         * <p>"무엇을 담았는가" 만큼 "무엇을 말했는가" 도 동작이다. 백업마다 되풀이되는 경고는
+         * 관리자가 실제로 보는 것이고, 하지도 않은 잘못을 30분마다 지적하면 진짜 경고까지
+         * 함께 흘려보내게 된다.</p>
+         */
+        private final List<String> warnings = new ArrayList<>();
+
+        private final Logger log = new Logger("BackupServiceTest", null) {
+            @Override
+            public void warning(String message) {
+                warnings.add(message);
+            }
+        };
         private final List<FakeWorld> worlds = new ArrayList<>();
 
         private BackupSettings settings;
         private BackupRepository repository = new BackupRepository(backupDir, log);
         private boolean hold;
         private boolean online;
+
+        /**
+         * 메인 스레드에 올린 작업 수.
+         *
+         * <p>워치독은 <b>틱 하나</b>가 얼마나 걸렸는지를 본다. 그래서 청크 flush 를 몇 개의
+         * 작업으로 나눠 올렸는지가 곧 동작이다 - 한 작업에 몰면 그 합이 한 틱이 된다.</p>
+         */
+        private int syncTasks;
 
         @Override
         public Logger logger() {
@@ -673,6 +885,7 @@ class BackupServiceTest {
 
         @Override
         public <T> T callSync(Callable<T> callable, long timeoutSeconds) throws Exception {
+            syncTasks++;
             return callable.call();
         }
 
@@ -717,9 +930,21 @@ class BackupServiceTest {
             this.autoSave = value;
         }
 
+        /** 예열 호출 횟수. 진짜 저장 <b>전에</b> 걸렸는지 보려고 센다. */
+        private int queuedSaves;
+
+        /** {@link #saveNow()} 시점에 예열이 몇 번 걸려 있었는지. */
+        private int queuedBeforeSave = -1;
+
+        @Override
+        public void saveQueued() {
+            queuedSaves++;
+        }
+
         @Override
         public void saveNow() {
             autoSaveWhileSaving = autoSave;
+            queuedBeforeSave = queuedSaves;
             if (saveFailure != null) throw saveFailure;
         }
     }

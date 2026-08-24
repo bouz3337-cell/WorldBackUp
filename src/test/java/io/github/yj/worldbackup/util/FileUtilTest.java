@@ -124,6 +124,27 @@ class FileUtilTest {
         assertEquals(10L, sizes.changedBytes());
     }
 
+    /**
+     * 접두사가 같다고 <b>그 폴더 안</b>인 것은 아니다.
+     *
+     * <p>뿌리가 {@code server/plugins} 일 때 {@code server/plugins-old/x} 도 문자열로는
+     * 접두사가 맞는다. 이어 붙이기로 처리하면 {@code plugins/old/x} 라는 있지도 않은 경로가
+     * 나오고, 그 이름으로 zip 에 담기면 복원이 엉뚱한 자리에 쓴다. 예외도 경고도 없이
+     * 백업은 성공한 것처럼 끝난다.</p>
+     */
+    @Test
+    void aSiblingWithTheSamePrefixIsNotReadAsAChild() {
+        Path root = tmp.resolve("server");
+        FileUtil.RelativePaths relatives =
+                FileUtil.RelativePaths.under(root, root.resolve("plugins"));
+
+        assertEquals("plugins", relatives.of(root.resolve("plugins")));
+        assertEquals("plugins/Economy/balances.yml",
+                relatives.of(root.resolve("plugins/Economy/balances.yml")));
+        assertEquals("plugins-old/x", relatives.of(root.resolve("plugins-old/x")),
+                "이름이 겹치는 형제 폴더를 자식으로 읽으면 엉뚱한 경로가 만들어진다");
+    }
+
     private static Path write(Path path, String content) throws IOException {
         Files.createDirectories(path.getParent());
         return Files.writeString(path, content, StandardCharsets.UTF_8);

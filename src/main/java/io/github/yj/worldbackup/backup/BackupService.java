@@ -161,6 +161,116 @@ public final class BackupService {
         return future;
     }
 
+    /**
+     * OneBack(서버 한 벌 통째로)을 비동기로 만든다.
+     *
+     * <p>평소 백업과 <b>같은 자물쇠</b>({@link #running})를 쓴다. 둘 다 월드를 얼리고 청크를
+     * 내려쓰므로 겹쳐 돌면 서로의 스냅샷 경계를 흐트러뜨리고, 무엇보다 자동 저장 원복이
+     * 뒤엉킨다. 하나가 도는 동안 다른 하나는 기다리는 편이 안전하다.</p>
+     */
+    public CompletableFuture<OneBack.Result> startOneBackAsync(String requestedBy) {
+        CompletableFuture<OneBack.Result> future = new CompletableFuture<>();
+        if (!running.compareAndSet(false, true)) {
+            future.completeExceptionally(new IllegalStateException("이미 백업이 진행 중입니다."));
+            return future;
+        }
+        try {
+            server.runAsync(() -> {
+                try {
+                    future.complete(executeOneBack(requestedBy));
+                } catch (Throwable t) {
+                    lastError = t.getMessage();
+                    // 여기서 반드시 남긴다. 명령으로 부른 것이면 부른 사람이 보지만, 주기로
+                    // 도는 것은 아무도 보지 않는다 - 디스크가 차서 실패해도 조용히 지나가면
+                    // 정작 서버를 옮기려는 날에 아카이브가 없다.
+                    server.logger().log(Level.SEVERE, "[OneBack] 만들지 못했습니다.", t);
+                    if (server.settings().broadcast()) {
+                        broadcastSafe("<red>서버 전체 백업(OneBack)에 실패했습니다. 콘솔 로그를 확인하세요.</red>",
+                                server.settings().broadcastPermission());
+                    }
+                    future.completeExceptionally(t);
+                } finally {
+                    running.set(false);
+                    progressText = "";
+                }
+            });
+        } catch (Throwable t) {
+            running.set(false);
+            progressText = "";
+            lastError = t.getMessage();
+            future.completeExceptionally(t);
+        }
+        return future;
+    }
+
+    /**
+     * 서버 폴더를 통째로 담는다.
+     *
+     * <p>월드를 얼리고 flush 하는 부분은 평소 백업과 <b>같은 코드</b>를 쓴다. 여기서만
+     * 따로 구현하면 그동안 쌓인 것들 - 틱을 나눠 저장하기, 쓰기 예열, 어떤 경로로 실패해도
+     * 자동 저장을 되돌리기 - 을 한 벌 더 관리하게 되고, 그중 하나가 빠지면 정작 가장 무거운
+     * 작업에서 빠지는 것이 된다.</p>
+     */
+    private OneBack.Result executeOneBack(String requestedBy) throws Exception {
+        BackupSettings settings = server.settings();
+        if (!settings.oneBackEnabled()) {
+            throw new IllegalStateException("oneback.enabled 가 꺼져 있습니다.");
+        }
+        Path serverRoot = settings.serverRoot();
+        Path directory = settings.oneBackDir();
+        Files.createDirectories(directory);
+
+        Instant now = Instant.now();
+        Path archive = OneBack.archiveFor(directory, now);
+        int dedupe = 1;
+        while (Files.exists(archive)) {
+            archive = directory.resolve(OneBack.PREFIX + BackupEntry.newId(now)
+                    + "-" + (++dedupe) + OneBack.SUFFIX);
+        }
+
+        server.logger().info("[OneBack] 서버 한 벌을 통째로 담습니다 -> " + archive.getFileName());
+        if (settings.broadcast()) {
+            broadcastSafe("<gray>서버 전체 백업(OneBack)을 시작합니다...</gray>", settings.broadcastPermission());
+        }
+
+        // 보관 정책을 <b>만들기 전에</b> 한 번 적용한다. keep 을 줄여 둔 서버라면 여기서 자리가
+        // 생기고, 그러면 아래 공간 점검을 통과할 수 있다. 정책 자체는 그대로이므로 평소보다 더
+        // 지우지 않는다 - 적용 시점만 뒤에서 앞으로 옮기는 것이다.
+        OneBack.prune(directory, settings.oneBackKeep(), server.logger());
+
+        OneBack.Result result;
+        try {
+            List<WorldRef> frozen = callSync(() -> freezeWorlds(settings, false));
+            settleWrites(settings, frozen);
+            flushWorlds(frozen);
+
+            result = OneBack.create(archive, serverRoot, settings, requestedBy,
+                    text -> {
+                        progressText = text;
+                        server.logger().info("[OneBack] 진행률 " + text);
+                    },
+                    server.logger());
+        } finally {
+            thawWorlds();
+        }
+
+        OneBack.writeGuide(directory, result.archive(), server.serverVersion(), server.logger());
+        OneBack.writeUnpackScripts(directory, server.logger());
+        OneBack.prune(directory, settings.oneBackKeep(), server.logger());
+
+        server.logger().info("[OneBack] 완료 - " + result.fileCount() + "개 파일 · "
+                + FileUtil.humanBytes(result.archiveBytes()) + " (원본 "
+                + FileUtil.humanBytes(result.originalBytes()) + ") · "
+                + FileUtil.humanMillis(result.elapsedMillis()));
+        server.logger().info("[OneBack] 이 폴더만 챙기면 다른 컴퓨터에서도 서버를 다시 열 수 있습니다: "
+                + directory);
+        if (settings.broadcast()) {
+            broadcastSafe("<green>서버 전체 백업(OneBack) 완료 · "
+                    + FileUtil.humanBytes(result.archiveBytes()) + "</green>", settings.broadcastPermission());
+        }
+        return result;
+    }
+
     /** 메인 스레드에서 동기 실행한다(서버 종료 시 사용). */
     public BackupEntry runBlocking(BackupType type, String label, CommandSender initiator) throws Exception {
         if (!running.compareAndSet(false, true)) {
@@ -266,8 +376,12 @@ public final class BackupService {
             // 복원 불가([손상])가 된다. 백업했다고 믿는 쪽이 더 위험하므로 어떤 경로로도 막는다.
             if (base != null) repo.pin(base.id());
 
-            // 1) 메인 스레드: 플레이어/월드 저장 후 자동 저장을 잠시 끈다.
-            List<WorldRef> frozen = callSync(() -> freezeWorlds(settings));
+            // 1) 메인 스레드: 플레이어 저장과 자동 저장 끄기. 둘 다 싸서 한 틱에 끝난다.
+            List<WorldRef> frozen = callSync(() -> freezeWorlds(settings, true));
+            // 2) 예열: 쓰기를 걸어만 두고 큐가 빠질 시간을 준다. 서버는 그동안 정상으로 돈다.
+            settleWrites(settings, frozen);
+            // 3) 비싼 쪽 - 청크 flush 는 월드마다 틱을 나눠 돈다.
+            flushWorlds(frozen);
 
             // 2) 백업 대상 수집
             List<Path> targets = new ArrayList<>();
@@ -312,13 +426,26 @@ public final class BackupService {
                     server.logger().warning("[백업] server-files 파일이 없어 건너뜁니다: " + relative);
                 }
             }
+            // extra-paths 보다 먼저 올린다. 순서가 바뀌면 아래 검사가 아무것도 걸러 내지 못한다.
+            addPluginsFolder(settings, serverRoot, targets);
             for (String relative : settings.extraPaths()) {
                 Path path = serverRoot.resolve(relative).normalize();
-                if (Files.exists(path)) {
-                    targets.add(path);
-                } else {
+                if (!Files.exists(path)) {
                     server.logger().warning("[백업] extra-paths 경로를 찾을 수 없습니다: " + relative);
+                    continue;
                 }
+                // 플러그인 폴더가 이미 품고 있으면 조용히 넘어간다.
+                //
+                // targets.plugins 가 생기기 전에는 "plugins/LuckPerms" 를 여기 적는 것이
+                // 권장 설정이었다(README 예시가 그랬다). 그대로 두면 dedupeTargets 가 걸러
+                // 내면서 <b>백업할 때마다</b> 경고를 한 줄 남긴다 - 30분 주기면 하루 48줄이고,
+                // 관리자가 하지도 않은 잘못을 지적하는 것처럼 보인다. 겹쳐도 결과는 같으므로
+                // 말없이 넘어가는 편이 맞다.
+                //
+                // 다른 겹침(예: extra-paths 에 "world/playerdata")은 그대로 알린다.
+                // 그건 예전부터 있던 동작이고 문서에도 그렇게 적혀 있다.
+                if (insidePlugins(settings, path)) continue;
+                targets.add(path);
             }
             addOwnConfig(settings, serverRoot, targets);
             if (targets.isEmpty()) {
@@ -471,6 +598,39 @@ public final class BackupService {
         }
     }
 
+    /** 이 경로가 <b>백업 대상이 된</b> 플러그인 폴더 안에 있는지. */
+    private static boolean insidePlugins(BackupSettings settings, Path path) {
+        if (settings.plugins() == BackupSettings.Plugins.NONE) return false;
+        Path dir = settings.pluginsDir();
+        return dir != null && path.toAbsolutePath().normalize().startsWith(dir);
+    }
+
+    /**
+     * {@code plugins/} 를 백업 대상에 넣는다.
+     *
+     * <p>월드만 되돌리면 경제 잔고·보호구역·권한처럼 <b>플러그인이 들고 있는 상태</b>는 그대로
+     * 남아 월드와 어긋난다. 되돌린 시점에는 없던 상점 거래가 그대로 살아 있고, 없어진 건물의
+     * 보호구역이 그대로 남는 식이다.</p>
+     *
+     * <p>폴더 이름을 여기 적지 않고 {@link BackupSettings#pluginsDir()} 을 쓴다 - 그쪽은
+     * 데이터 폴더의 부모라, {@code --plugins} 로 폴더를 옮긴 서버에서도 맞는 곳을 가리킨다.</p>
+     *
+     * <p>jar 를 담을지는 설정이 정한다. 담더라도 <b>복원은 jar 를 덮어쓰지 않는다</b> -
+     * 이유는 {@link BackupSettings#preservePatterns()} 쪽에 적어 두었다.</p>
+     */
+    private void addPluginsFolder(BackupSettings settings, Path serverRoot, List<Path> targets) {
+        if (settings.plugins() == BackupSettings.Plugins.NONE) return;
+
+        Path dir = settings.pluginsDir();
+        if (dir == null || !Files.isDirectory(dir)) return;
+        if (FileUtil.relativize(serverRoot, dir) == null) {
+            server.logger().warning("[백업] 플러그인 폴더가 서버 폴더(" + serverRoot
+                    + ") 밖에 있어 백업할 수 없습니다: " + dir);
+            return;
+        }
+        targets.add(dir);
+    }
+
     /**
      * 플러그인 자기 {@code config.yml} 을 백업 대상에 넣는다.
      *
@@ -568,39 +728,123 @@ public final class BackupService {
     /**
      * 월드를 저장하고 자동 저장을 끈다. <b>반드시 메인 스레드에서 실행된다.</b>
      * 원래 값은 반환값이 아니라 {@link #frozenWorlds} 에 즉시 기록한다.
+     *
+     * @param snapshotBoundary 이 저장이 <b>복원 지점</b>을 하나 만드는지. 평소 백업만 true 다.
+     *                         자세한 이유는 아래.
      */
-    private List<WorldRef> freezeWorlds(BackupSettings settings) {
+    private List<WorldRef> freezeWorlds(BackupSettings settings, boolean snapshotBoundary) {
         // 스냅샷 경계는 바로 여기다. 이 시점 이후의 변경은 다음 백업이 담당하므로 플래그를 내린다.
         // 압축이 끝난 뒤에 내리면, 압축 중(대형 월드에서는 수 분)에 생긴 변경이 "변경 없음"으로
         // 묻혀 다음 주기가 통째로 건너뛰어진다. 접속자가 있으면 계속 변하는 중이므로 유지한다.
-        worldChanged.set(server.hasOnlinePlayers());
+        //
+        // <b>OneBack 은 이 플래그를 내리지 않는다.</b> 내리면 "변경 없음" 으로 보여 다음 자동
+        // 백업이 건너뛰어지는데, 그 사이의 변경은 OneBack 안에만 남는다. OneBack 은 /wb restore
+        // 목록에 오르지 않으므로 그 시점으로 되돌릴 방법이 사라진다 - 백업을 한 번 더 떴다는
+        // 이유로 복원 지점을 잃는 셈이다.
+        if (snapshotBoundary) worldChanged.set(server.hasOnlinePlayers());
         server.savePlayers();
 
         List<WorldRef> refs = new ArrayList<>();
-        long flushStart = System.currentTimeMillis();
         for (ServerBridge.WorldHandle world : server.worlds()) {
             if (!settings.includesWorld(world.name())) continue;
-            // 원래 값을 먼저 적어 둔다. 아래 저장이 예외로 끝나도 원복할 재료가 남아야 한다.
+            // 원래 값을 먼저 적어 둔다. 뒤이은 저장이 예외로 끝나도 원복할 재료가 남아야 한다.
             frozenWorlds.putIfAbsent(world.name(), world.autoSave());
             world.autoSave(false);
-            try {
-                // 청크 쓰기가 디스크에 끝날 때까지 기다린다. 기다리지 않으면 서버가 아직 쓰고
-                // 있는 region 파일을 압축하게 되어, 헤더와 데이터가 어긋난 조각이 백업에 담긴다.
-                // 복원해 보면 "Corrupt regionfile header" 가 뜨고 복구되지 않은 청크는 통째로
-                // 재생성된다. 압축이 시작되기 전에 디스크 쓰기가 끝나야 한다.
-                world.saveNow();
-            } catch (Exception e) {
-                server.logger().log(Level.WARNING, "[백업] 월드 저장 실패: " + world.name(), e);
-            }
             refs.add(new WorldRef(world.name(), world.folder()));
         }
-
-        long flushed = System.currentTimeMillis() - flushStart;
-        if (flushed > 1000L) {
-            // 이 시간만큼 서버가 멈춘다. 관리자가 원인을 알 수 있게 남긴다.
-            server.logger().info("[백업] 청크 저장이 끝나기를 기다렸습니다: " + FileUtil.humanMillis(flushed));
-        }
         return refs;
+    }
+
+    /**
+     * 청크 쓰기가 디스크에 끝날 때까지 기다린다. <b>월드마다 틱을 나눈다.</b>
+     *
+     * <p>기다리는 것 자체는 양보할 수 없다. 기다리지 않으면 서버가 아직 쓰고 있는 region
+     * 파일을 압축하게 되어, 헤더와 데이터가 어긋난 조각이 백업에 담긴다. 복원해 보면
+     * "Corrupt regionfile header" 가 뜨고 복구되지 않은 청크는 통째로 재생성된다.</p>
+     *
+     * <p>나누는 이유는 <b>워치독이 틱 하나를 보기 때문이다.</b> 월드 셋을 한 틱에 몰아
+     * 저장하면 그 합이 한 틱의 길이가 된다 - 월드마다 4초씩만 걸려도 12초짜리 틱이 되어
+     * 스레드 덤프가 찍히고, 그 덤프에는 이 플러그인의 스택이 남으므로 관리자는 이쪽을
+     * 의심하게 된다. 더 나쁜 것은 그 합이 워치독의 <b>치명 임계</b>에 닿으면 서버가
+     * 강제로 죽는다는 것이다. 한 틱에 하나씩 나누면 멈추는 총량은 그대로지만 한 번에
+     * 멈추는 길이가 월드 수만큼 줄어든다.</p>
+     *
+     * <p>대신 스냅샷 경계가 월드마다 틱 몇 개만큼 어긋난다. 압축은 그보다 한참 뒤에
+     * 시작하고 그동안 자동 저장은 이미 꺼져 있으므로, 지금도 감수하고 있는 어긋남보다
+     * 작다.</p>
+     */
+    private void flushWorlds(List<WorldRef> refs) throws Exception {
+        long total = 0L;
+        for (WorldRef ref : refs) {
+            long spent = callSync(() -> flushWorld(ref.name()));
+            total += spent;
+            if (spent > 1000L) {
+                // 이 시간만큼 서버가 멈춘다. 어느 월드가 비싼지까지 남겨야 관리자가
+                // targets.worlds 로 뺄지, 디스크를 옮길지 판단할 수 있다.
+                server.logger().info("[백업] 청크 저장을 기다렸습니다 · " + ref.name()
+                        + ": " + FileUtil.humanMillis(spent));
+            }
+        }
+        if (refs.size() > 1 && total > 1000L) {
+            server.logger().info("[백업] 청크 저장 합계 " + FileUtil.humanMillis(total)
+                    + " (월드 " + refs.size() + "개를 틱을 나눠 저장했습니다)");
+        }
+    }
+
+    /**
+     * 쓰기를 미리 걸어 두고 큐가 빠질 시간을 준다.
+     *
+     * <p>백업이 서버를 멈추는 시간의 대부분은 청크를 직렬화하는 비용이 아니라 <b>이미 큐에
+     * 쌓인 쓰기가 디스크로 내려가기를 기다리는 것</b>이다. 워치독이 남기는 스레드 덤프에
+     * {@code MoonriseRegionFileIO.partialFlush} → {@code linearLongBackoff} 로 찍히는
+     * 그 대기다. 틱을 나누는 것만으로는 한 번에 멈추는 길이만 줄고 총량은 그대로다.</p>
+     *
+     * <p>그 대기를 실제로 없애는 방법은 하나뿐이다 - <b>기다리기 전에 큐를 비워 두는 것.</b>
+     * 먼저 기다리지 않는 저장으로 쓰기를 걸어 두고, 서버가 정상적으로 도는 동안 I/O 스레드가
+     * 그것을 내려쓰게 둔다. 이 시간에 서버는 멈추지 않는다 - 잠드는 것은 백업 스레드뿐이다.
+     * 그 뒤의 진짜 flush 는 그 사이에 새로 더러워진 청크만 기다리면 된다.</p>
+     *
+     * <p>직렬화 비용이 두 배가 되지는 않는다. 예열이 끝나면 그 청크들은 깨끗해지므로, 두 번째
+     * 저장은 그 사이의 변경분만 다시 만든다.</p>
+     *
+     * <p><b>측정해 두는 것</b> - 디스크가 빠르면 애초에 기다림이 없어서 이 예열은 아무것도
+     * 줄이지 못한다. NVMe·45MB 월드·청크 1000개에서 재 보니 예열 없이 76ms, 예열하고 74ms 로
+     * 차이가 없었다. 그 환경에서 저 시간은 기다림이 아니라 로드된 청크를 훑는 비용이다.
+     * 이 예열이 겨냥하는 것은 그 기다림이 <b>초 단위</b>로 늘어나는 환경 - 느린 디스크,
+     * 컨테이너 호스팅의 I/O 제한, 청크가 아주 많은 월드다. 그래서 끌 수 있게 두었다.</p>
+     */
+    private void settleWrites(BackupSettings settings, List<WorldRef> refs) throws Exception {
+        long settle = settings.flushSettleMillis();
+        if (settle <= 0 || refs.isEmpty()) return;
+
+        for (WorldRef ref : refs) {
+            callSync(() -> {
+                server.world(ref.name()).ifPresent(world -> {
+                    try {
+                        world.saveQueued();
+                    } catch (Exception e) {
+                        // 예열은 최적화일 뿐이다. 실패해도 아래 진짜 flush 가 제 몫을 한다.
+                        server.logger().log(Level.WARNING,
+                                "[백업] 청크 쓰기를 미리 걸지 못했습니다: " + ref.name(), e);
+                    }
+                });
+                return null;
+            });
+        }
+        Thread.sleep(settle);
+    }
+
+    /** 월드 하나를 저장하고 걸린 시간을 돌려준다. 메인 스레드에서 실행된다. */
+    private long flushWorld(String name) {
+        ServerBridge.WorldHandle world = server.world(name).orElse(null);
+        if (world == null) return 0L;
+        long startedAt = System.currentTimeMillis();
+        try {
+            world.saveNow();
+        } catch (Exception e) {
+            server.logger().log(Level.WARNING, "[백업] 월드 저장 실패: " + name, e);
+        }
+        return System.currentTimeMillis() - startedAt;
     }
 
     /** 자동 저장을 원래대로 되돌린다. 어떤 경로로 실패하든 반드시 시도한다. */

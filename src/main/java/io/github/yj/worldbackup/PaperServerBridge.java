@@ -122,6 +122,12 @@ public final class PaperServerBridge implements ServerBridge {
         }
 
         @Override
+        public void saveQueued() {
+            // 예약만 하고 즉시 돌아온다. 예열용이다.
+            world.save(false);
+        }
+
+        @Override
         public void saveNow() {
             // save(true) 여야 한다. 인자 없는 save() 는 save(false) 이고, 그건 청크 쓰기를
             // 예약만 하고 즉시 돌아온다.

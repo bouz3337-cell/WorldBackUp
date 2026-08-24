@@ -1,0 +1,142 @@
+# ============================================================
+#  WorldBackUp - 자동 백업 / 롤백 플러그인 (Minecraft 26.2)
+#  값을 바꾼 뒤에는 /wb reload 를 실행하세요.
+# ============================================================
+
+backup:
+  # 자동(주기) 백업 사용 여부
+  enabled: true
+
+  # 백업 방식
+  #   full         - 매번 전체를 압축합니다. 백업 하나가 독립적이라 가장 단순합니다.
+  #   differential - 전체 백업 하나를 기준으로, 이후에는 바뀐 파일만 저장합니다.
+  #                  월드가 크고 주기가 짧을수록 효과가 큽니다.
+  #                  (예: 10GB 월드 30분 주기 -> 차등본 하나에 수십~수백 MB)
+  #
+  # 차등 백업은 "기준 전체 백업 + 차등본" 두 개가 있어야 복원됩니다.
+  # 기준 백업은 딸린 차등본이 모두 정리되기 전까지 자동 삭제되지 않으며,
+  # /wb list 에서 [차등] 으로 표시됩니다.
+  mode: full
+
+  # 차등 백업을 이 개수만큼 만들면 전체 백업을 다시 만듭니다. (0 = 자동 재생성 안 함)
+  # 30분 주기 기준으로 24 는 하루에 한 번 전체 백업을 뜻합니다.
+  # mode: full 이면 무시됩니다.
+  full-every: 24
+
+  # 백업 주기 (분). 예) 30 = 30분마다
+  interval-minutes: 30
+
+  # 서버 시작 후 첫 자동 백업까지의 대기 시간 (분)
+  initial-delay-minutes: 10
+
+  # 서버가 켜질 때 한 번 백업할지 여부
+  on-startup: false
+
+  # 서버가 꺼질 때 백업할지 여부.
+  # 켜면 종료가 백업 시간만큼 늦어집니다. 호스팅 패널이 종료를 강제로
+  # 끊는 환경에서는 false 를 권장합니다.
+  on-shutdown: false
+
+  # 아무도 접속하지 않았고 마지막 백업 이후 변경이 없으면 자동 백업을 건너뜁니다.
+  skip-if-no-players: true
+
+  # zip 압축 레벨 0(무압축, 가장 빠름) ~ 9(최대 압축, 가장 느림)
+  # 월드가 크면 3~5 를 권장합니다.
+  compression-level: 4
+
+  # 백업 저장 폴더.
+  # 상대 경로면 plugins/WorldBackUp/ 기준, 절대 경로도 사용 가능합니다.
+  # 예) directory: "D:/minecraft-backups"  (다른 디스크 권장!)
+  directory: "backups"
+
+  # 백업 시작/완료를 채팅으로 알릴지 여부
+  broadcast: true
+
+  # true 면 worldbackup.notify 권한이 있는 사람에게만 알립니다.
+  broadcast-permission-only: true
+
+targets:
+  # 백업할 월드. "*" 는 서버에 로드된 모든 월드입니다.
+  # 특정 월드만 원하면 예) worlds: ["world", "world_nether"]
+  # ※ 플레이어 인벤토리/좌표/업적/통계는 메인 월드 폴더(world/playerdata 등)에
+  #    들어 있으므로 메인 월드는 반드시 포함하세요.
+  worlds: ["*"]
+
+  # 서버 루트에 있는 개별 파일들
+  server-files:
+    - "server.properties"
+    - "ops.json"
+    - "whitelist.json"
+    - "banned-players.json"
+    - "banned-ips.json"
+    - "usercache.json"
+    - "bukkit.yml"
+    - "spigot.yml"
+    - "permissions.yml"
+
+  # 추가로 백업할 경로 (서버 루트 기준 상대 경로).
+  # 경제/권한 플러그인 데이터를 함께 백업하고 싶을 때 사용합니다.
+  # 예)
+  #   - "plugins/LuckPerms"
+  #   - "plugins/Essentials/userdata"
+  #   - "config"
+  extra-paths: []
+
+  # 백업에서 제외할 경로 패턴 (glob). 상대 경로에 대해 매칭됩니다.
+  exclude:
+    - "**/session.lock"
+    - "**/*.lock"
+    - "**/logs/**"
+    - "**/crash-reports/**"
+    - "**/cache/**"
+    - "**/*.log"
+    - "**/*.log.gz"
+    - "plugins/WorldBackUp/backups/**"
+
+retention:
+  # 보관할 최대 백업 개수 (0 = 무제한)
+  max-backups: 48
+
+  # 이 일수보다 오래된 백업은 삭제 (0 = 무제한)
+  max-age-days: 14
+
+  # 위 조건에 걸려도 "하루 중 가장 최근 백업"은 최근 N일치를 남깁니다.
+  keep-daily: 7
+
+  # 수동 백업(/wb backup)과 복원 직전 자동 백업은 자동 삭제하지 않습니다.
+  protect-manual: true
+
+  # 위에서 보호한 백업의 최대 개수. 넘으면 오래된 것부터 지웁니다. (0 = 무제한)
+  # /wb lock 으로 직접 잠근 백업은 이 제한과 무관하게 영원히 남습니다.
+  # 이 값이 없으면 수동/복원 직전 백업이 무한히 쌓여 디스크를 채웁니다.
+  max-protected: 10
+
+  # 남은 디스크 공간이 이 값(GB) 미만이면 백업을 중단하고 경고합니다.
+  min-free-disk-gb: 5
+
+restore:
+  # /wb confirm 이후 서버 종료까지의 카운트다운 (초)
+  countdown-seconds: 15
+
+  # 복원 직전에 현재 상태를 한 번 더 백업합니다. (복원 취소용, 강력 권장)
+  create-safety-backup: true
+
+  # 기존 데이터를 지우기 전에 백업 zip 을 끝까지 읽어 무결성을 검사합니다. (강력 권장)
+  # 깨진 백업으로 월드만 날리는 사고를 막아 줍니다.
+  # 아카이브 크기에 비례해 복원 시간이 늘어납니다.
+  verify-archive: true
+
+  # 복원 시 교체되는 기존 파일을 지우지 않고
+  # plugins/WorldBackUp/replaced/<시각>/ 로 옮겨 둡니다.
+  keep-replaced-files: true
+
+  # 위 replaced 스냅샷을 최근 몇 개까지 남길지. (0 = 무제한)
+  # 복원 한 번에 월드 전체 크기만큼 쌓이므로 반드시 제한을 두세요.
+  keep-replaced-max: 3
+
+  # /wb restore 후 /wb confirm 을 입력해야 하는 제한 시간 (초)
+  confirm-timeout-seconds: 60
+
+  # 복원 시 덮어쓰지 않고 그대로 둘 파일 패턴
+  preserve:
+    - "**/session.lock"

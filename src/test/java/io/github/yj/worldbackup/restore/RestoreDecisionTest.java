@@ -1,5 +1,6 @@
 package io.github.yj.worldbackup.restore;
 
+import io.github.yj.worldbackup.util.GlobMatcher;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -108,7 +109,8 @@ class RestoreDecisionTest {
                 List.of("**/session.lock"),
                 List.of("**/logs/**", "plugins/WorldBackUp/replaced/**"));
 
-        assertEquals(List.of("**/session.lock", "**/logs/**", "plugins/WorldBackUp/replaced/**"), preserve);
+        assertTrue(preserve.containsAll(
+                List.of("**/session.lock", "**/logs/**", "plugins/WorldBackUp/replaced/**")));
     }
 
     /** 같은 패턴이 양쪽에 있어도 한 번만 남는다. */
@@ -118,7 +120,49 @@ class RestoreDecisionTest {
                 List.of("**/session.lock"),
                 List.of("**/session.lock", "**/*.log"));
 
-        assertEquals(List.of("**/session.lock", "**/*.log"), preserve);
+        assertEquals(1, preserve.stream().filter("**/session.lock"::equals).count());
+    }
+
+    /**
+     * <b>밴 목록은 어떤 설정에서도 복원되지 않는다.</b>
+     *
+     * <p>이 플러그인을 쓰는 가장 흔한 순간이 "테러범을 밴하고 그 전으로 되돌리는" 것이다.
+     * 밴 목록까지 되돌리면 방금 건 밴이 함께 풀려, 되돌리자마자 같은 사람이 다시 들어온다.
+     * 복원이 사고를 반쯤 되살리는 셈이라, 설정과 무관하게 항상 보존 목록에 얹는다.</p>
+     */
+    @Test
+    void banListsArePreservedNoMatterWhatTheConfigSays() {
+        List<String> preserve = RestoreService.restorePreserve(List.of(), List.of());
+
+        assertTrue(preserve.contains("banned-players.json"), "밴한 사람은 되돌린 뒤에도 밴이어야 한다");
+        assertTrue(preserve.contains("banned-ips.json"));
+    }
+
+    /** 관리자가 같은 것을 이미 적어 두었어도 두 번 들어가지 않는다. */
+    @Test
+    void aBanListTheAdminAlreadyListedIsNotAddedTwice() {
+        List<String> preserve = RestoreService.restorePreserve(
+                List.of("banned-players.json"), List.of());
+
+        assertEquals(1, preserve.stream().filter("banned-players.json"::equals).count());
+    }
+
+    /**
+     * 보존 목록에 <b>이름을 넣는 것만으로는</b> 지켜지지 않는다.
+     *
+     * <p>복원은 그 이름을 {@link GlobMatcher} 에 넣어 판단한다. 패턴 문법과 실제 상대 경로가
+     * 어긋나면 아무것도 걸리지 않는데, <b>조용히</b> 통과한다 - 밴 목록이 지켜지는 줄 알고
+     * 되돌렸는데 밴이 풀려 있게 된다. 그래서 실제 매칭까지 확인한다.</p>
+     */
+    @Test
+    void thePreservedBanListsActuallyMatchTheirRealPaths() {
+        GlobMatcher preserve = new GlobMatcher(
+                RestoreService.restorePreserve(List.of(), List.of()));
+
+        assertTrue(preserve.matchesFile("banned-players.json"));
+        assertTrue(preserve.matchesFile("banned-ips.json"));
+        // 옆 파일까지 함께 지켜지면 안 된다 - op 는 되돌려야 한다
+        assertFalse(preserve.matchesFile("ops.json"));
     }
 
     // ------------------------------------------------------------------

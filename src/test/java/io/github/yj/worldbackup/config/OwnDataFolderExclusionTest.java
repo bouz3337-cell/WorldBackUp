@@ -125,7 +125,13 @@ class OwnDataFolderExclusionTest {
         assertTrue(exclude.matchesFile("plugins/WorldBackUp/config.yml"));
     }
 
-    /** 데이터 폴더가 서버 폴더 밖이면 애초에 백업되지 않으므로 아무 패턴도 필요 없다. */
+    /**
+     * 데이터 폴더가 서버 폴더 밖이면 그 폴더에 대한 패턴은 만들지 않는다.
+     *
+     * <p>애초에 백업되지 않는 경로라 뺄 것이 없고, 억지로 패턴을 만들면 엉뚱한 경로를 걸러
+     * 낼 수 있다. (OneBack 폴더는 서버 폴더 안에 있으므로 그쪽 패턴은 그대로 남는다 -
+     * 서버 한 벌짜리 아카이브를 평소 백업이 삼키면 백업이 두 배가 된다)</p>
+     */
     @Test
     void aDataFolderOutsideTheServerNeedsNoPatterns() {
         YamlConfiguration cfg = new YamlConfiguration();
@@ -133,8 +139,12 @@ class OwnDataFolderExclusionTest {
         BackupSettings settings = BackupSettings.load(cfg,
                 tmp.resolve("outside/WorldBackUp"), tmp.resolve("server"));
 
-        assertTrue(settings.excludePatterns().isEmpty(),
-                "서버 폴더 밖의 경로에 대해 패턴을 만들어 두면 엉뚱한 경로를 걸러 낼 수 있다");
+        for (String pattern : settings.excludePatterns()) {
+            assertFalse(pattern.contains("WorldBackUp"),
+                    "서버 폴더 밖의 경로에 대해 패턴을 만들어 두면 엉뚱한 경로를 걸러 낼 수 있다: " + pattern);
+        }
+        assertTrue(settings.excludePatterns().contains("OneBack"),
+                "OneBack 은 서버 폴더 안이라 평소 백업에서 빠져야 한다");
     }
 
     /**

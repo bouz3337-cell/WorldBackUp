@@ -348,12 +348,19 @@ public final class RestoreService {
      * <p>백업에서 제외했던 것(로그·캐시·플러그인 자기 상태)은 복원 때도 건드리지 않는다.
      * 그 목록이 빠지면 복원이 <b>백업에 없는 파일을 지우기만</b> 한다.</p>
      *
+     * <p>여기에 {@link UserLists#NEVER_RESTORED}(밴 목록)를 <b>언제나</b> 얹는다. 이유는
+     * 그쪽에 적어 두었다 - 이 플러그인을 쓰는 가장 흔한 순간이 "테러범을 밴하고 되돌리는"
+     * 것인데, 밴 목록까지 되돌리면 그 밴이 풀린다.</p>
+     *
      * @param configured      {@code restore.preserve} 설정
      * @param archiveExcludes 그 백업을 만들 때 쓰인 제외 패턴
      */
     public static List<String> restorePreserve(List<String> configured, List<String> archiveExcludes) {
         List<String> preserve = new ArrayList<>(configured);
         for (String pattern : archiveExcludes) {
+            if (!preserve.contains(pattern)) preserve.add(pattern);
+        }
+        for (String pattern : UserLists.NEVER_RESTORED) {
             if (!preserve.contains(pattern)) preserve.add(pattern);
         }
         return preserve;
