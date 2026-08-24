@@ -19,6 +19,7 @@ import io.github.yj.worldbackup.backup.BackupRepository;
 import io.github.yj.worldbackup.backup.BackupType;
 import io.github.yj.worldbackup.backup.RetentionTiers;
 import io.github.yj.worldbackup.config.BackupSettings;
+import io.github.yj.worldbackup.util.Clock;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.Msg;
 import io.github.yj.worldbackup.util.Sched;
@@ -60,9 +61,6 @@ public final class WorldBackUpCommand {
     /** 채팅창이 넘치지 않도록 한 화면에 뿌릴 최대 줄 수. */
     private static final int DAY_VIEW_LIMIT = 20;
     private static final int DAY_LIST_LIMIT = 30;
-
-    private static final DateTimeFormatter TIME_ONLY =
-            DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault());
 
     private final WorldBackUpPlugin plugin;
 
@@ -365,8 +363,8 @@ public final class WorldBackUpCommand {
     /** 그 날짜에 무엇이 얼마나 있는지 한 줄. */
     static String describeDay(LocalDate day, List<BackupEntry> ofDay) {
         String label = dayLabel(day).trim(); // " (오늘)" -> "(오늘)"
-        String newest = TIME_ONLY.format(ofDay.get(0).createdAt());
-        String oldest = TIME_ONLY.format(ofDay.get(ofDay.size() - 1).createdAt());
+        String newest = Clock.hourMinute(ofDay.get(0).createdAt());
+        String oldest = Clock.hourMinute(ofDay.get(ofDay.size() - 1).createdAt());
         String span = ofDay.size() == 1 ? newest : oldest + "~" + newest;
         long bytes = ofDay.stream().mapToLong(BackupEntry::archiveBytes).sum();
         return (label.isEmpty() ? "" : label + " · ") + ofDay.size() + "개 · "
@@ -675,8 +673,8 @@ public final class WorldBackUpCommand {
                 break;
             }
             List<BackupEntry> ofDay = day.getValue(); // 최신순
-            String newest = TIME_ONLY.format(ofDay.get(0).createdAt());
-            String oldest = TIME_ONLY.format(ofDay.get(ofDay.size() - 1).createdAt());
+            String newest = Clock.hourMinute(ofDay.get(0).createdAt());
+            String oldest = Clock.hourMinute(ofDay.get(ofDay.size() - 1).createdAt());
             String span = ofDay.size() == 1 ? newest : oldest + "~" + newest;
             long bytes = ofDay.stream().mapToLong(BackupEntry::archiveBytes).sum();
 
@@ -758,7 +756,7 @@ public final class WorldBackUpCommand {
     }
 
     private static String dayLabel(LocalDate day) {
-        LocalDate today = LocalDate.now(ZoneId.systemDefault());
+        LocalDate today = Clock.today();
         if (day.equals(today)) return " (오늘)";
         if (day.equals(today.minusDays(1))) return " (어제)";
         return "";
@@ -1107,6 +1105,9 @@ public final class WorldBackUpCommand {
         Msg.sendRaw(sender, " <gray>저장 위치:</gray> <white>" + settings.backupDir() + "</white>");
         Msg.sendRaw(sender, " <gray>디스크   :</gray> <white>"
                 + FileUtil.humanBytes(FileUtil.usableSpace(settings.backupDir())) + " 남음</white>");
+        // 시각이 어긋나 있으면 되돌릴 시점을 엉뚱하게 고른다. 여기 보이면 바로 알아챈다.
+        Msg.sendRaw(sender, " <gray>시계     :</gray> <white>" + Clock.display(Instant.now())
+                + "</white> <dark_gray>(" + Clock.zone() + ")</dark_gray>");
         showOneBack(sender, settings);
         // 계단을 켜면 max-backups/max-age-days 는 동작하지 않는다. 그걸 그대로 보여 주면
         // 실제로 적용되지 않는 값을 보고 판단하게 된다.
@@ -1177,7 +1178,7 @@ public final class WorldBackUpCommand {
     private Optional<BackupEntry> resolveAt(CommandSender sender, Instant target) {
         Optional<BackupEntry> found = plugin.repository().resolveAtOrBefore(target);
         if (found.isEmpty()) {
-            Msg.send(sender, "<red><white>" + BackupEntry.DISPLAY_FORMAT.format(target)
+            Msg.send(sender, "<red><white>" + Clock.display(target)
                     + "</white> 이전의 백업이 없습니다.</red>");
             Msg.send(sender, "<gray>가장 오래된 백업보다 더 과거를 요청하셨습니다. "
                     + "<white>/wb list</white> 로 보관 범위를 확인하세요.</gray>");
@@ -1185,7 +1186,7 @@ public final class WorldBackUpCommand {
         }
         BackupEntry entry = found.get();
         String gap = FileUtil.humanDuration(Duration.between(entry.createdAt(), target));
-        Msg.send(sender, "<gray>요청 <white>" + BackupEntry.DISPLAY_FORMAT.format(target)
+        Msg.send(sender, "<gray>요청 <white>" + Clock.display(target)
                 + "</white> → 그 이전 가장 최근 백업 <white>" + entry.displayTime()
                 + "</white> <dark_gray>(" + gap + " 더 과거)</dark_gray></gray>");
         return found;

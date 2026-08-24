@@ -17,6 +17,7 @@ import io.github.yj.worldbackup.restore.RestoreService;
 import io.github.yj.worldbackup.restore.UserListSync;
 import io.github.yj.worldbackup.restore.UserLists;
 import io.github.yj.worldbackup.update.UpdateService;
+import io.github.yj.worldbackup.util.Clock;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.Sched;
 import org.bukkit.World;
@@ -302,6 +303,9 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         reloadConfig();
         Path serverRoot = resolveServerRoot();
         settings = BackupSettings.load(getConfig(), getDataFolder().toPath(), serverRoot);
+
+        // 시각을 적는 시계를 먼저 세운다. 아래 어떤 것도 시각을 찍기 전에.
+        Clock.use(settings.timezone());
 
         // 저장 위치가 그대로면 저장소를 <b>재사용한다.</b> 새로 만들면 진행 중인 차등 백업이
         // 걸어 둔 pin 이 옛 객체에 남는데, 백업 스레드는 그 옛 객체를 계속 붙잡고 있으므로

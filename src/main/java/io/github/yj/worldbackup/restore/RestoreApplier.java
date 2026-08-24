@@ -2,6 +2,7 @@ package io.github.yj.worldbackup.restore;
 
 import io.github.yj.worldbackup.backup.BackupEntry;
 import io.github.yj.worldbackup.backup.Manifest;
+import io.github.yj.worldbackup.util.Clock;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.GlobMatcher;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -17,8 +18,6 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.nio.file.attribute.FileTime;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Enumeration;
@@ -41,8 +40,6 @@ import java.util.zip.ZipFile;
  */
 public final class RestoreApplier {
 
-    private static final DateTimeFormatter STAMP =
-            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneId.systemDefault());
 
     /**
      * 사람이 확인해야 하는 복원 실패 기록의 파일 이름 앞부분.
@@ -117,7 +114,7 @@ public final class RestoreApplier {
 
         if (Files.exists(processing)) {
             // 직전 복원이 중간에 끊겼다. 같은 작업을 반복하면 더 위험하므로 중단한다.
-            Path failed = dataFolder.resolve(FAILURE_PREFIX + STAMP.format(Instant.now()) + ".yml");
+            Path failed = dataFolder.resolve(FAILURE_PREFIX + Clock.id(Instant.now()) + ".yml");
             try {
                 Files.move(processing, failed, StandardCopyOption.REPLACE_EXISTING);
             } catch (IOException ignored) {
@@ -203,7 +200,7 @@ public final class RestoreApplier {
 
             Path replacedDir = null;
             if (pending.keepReplaced()) {
-                replacedDir = dataFolder.resolve(REPLACED_FOLDER).resolve(STAMP.format(Instant.now()));
+                replacedDir = dataFolder.resolve(REPLACED_FOLDER).resolve(Clock.id(Instant.now()));
                 Files.createDirectories(replacedDir);
                 log.info("교체되는 기존 파일은 " + replacedDir + " 로 옮깁니다.");
             }
@@ -282,13 +279,13 @@ public final class RestoreApplier {
      * 자동 백업과 보관 정리를 멈춘다.</p>
      */
     private static void writeFailureMarker(Path dataFolder, PendingRestore pending, String error, Logger log) {
-        Path marker = dataFolder.resolve(FAILURE_PREFIX + STAMP.format(Instant.now()) + ".yml");
+        Path marker = dataFolder.resolve(FAILURE_PREFIX + Clock.id(Instant.now()) + ".yml");
         try {
             YamlConfiguration yaml = new YamlConfiguration();
             yaml.set("id", pending.id());
             yaml.set("archive", pending.archive().toString());
             yaml.set("requested-by", pending.requestedBy());
-            yaml.set("failed-at", BackupEntry.DISPLAY_FORMAT.format(Instant.now()));
+            yaml.set("failed-at", Clock.display(Instant.now()));
             yaml.set("error", error);
             yaml.set("안내", "이 파일이 있는 동안 자동 백업과 보관 정리가 멈춥니다. "
                     + "월드를 확인한 뒤 이 파일을 지우고 /wb reload 를 실행하세요.");
@@ -836,7 +833,7 @@ public final class RestoreApplier {
             yaml.set("backup-id", pending.id());
             yaml.set("archive", pending.archive().toString());
             yaml.set("requested-by", pending.requestedBy());
-            yaml.set("finished-at", BackupEntry.DISPLAY_FORMAT.format(Instant.now()));
+            yaml.set("finished-at", Clock.display(Instant.now()));
             yaml.set("elapsed-ms", elapsedMillis);
             yaml.set("restored-files", stats.restored);
             yaml.set("restored-bytes", stats.restoredBytes);

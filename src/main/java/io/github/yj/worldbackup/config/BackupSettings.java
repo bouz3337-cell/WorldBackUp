@@ -4,6 +4,7 @@ import io.github.yj.worldbackup.backup.Archiver;
 import io.github.yj.worldbackup.backup.RetentionTiers;
 import io.github.yj.worldbackup.restore.PendingRestore;
 import io.github.yj.worldbackup.restore.RestoreApplier;
+import io.github.yj.worldbackup.util.Clock;
 import io.github.yj.worldbackup.util.FileUtil;
 import io.github.yj.worldbackup.util.GlobMatcher;
 import org.bukkit.configuration.file.FileConfiguration;
@@ -46,6 +47,9 @@ public final class BackupSettings {
     private final int maxSkippedCycles;
     private final int compressionLevel;
     private final long flushSettleMillis;
+
+    /** 이 플러그인이 시각을 적을 때 쓸 시간대. 비어 있으면 서버 시계. */
+    private final String timezone;
     /** OneBack - 서버 한 벌을 통째로 담은 아카이브. 이 폴더만 챙기면 아무 데서나 서버를 다시 연다. */
     private final boolean oneBackEnabled;
     private final Path oneBackDir;
@@ -129,6 +133,12 @@ public final class BackupSettings {
         this.maxSkippedCycles = Math.max(0, cfg.getInt("backup.max-skipped-cycles", 48));
         this.compressionLevel = Math.min(9, Math.max(0, cfg.getInt("backup.compression-level", 4)));
         this.flushSettleMillis = Math.max(0, cfg.getInt("backup.flush-settle-seconds", 3)) * 1000L;
+        String tz = cfg.getString("backup.timezone", "");
+        this.timezone = tz == null ? "" : tz.trim();
+        if (!Clock.known(this.timezone)) {
+            tierWarnings.add("backup.timezone 을 알아볼 수 없습니다: " + this.timezone
+                    + " - 서버 시계를 그대로 씁니다. (예: Asia/Seoul)");
+        }
         this.broadcast = cfg.getBoolean("backup.broadcast", true);
         this.broadcastPermission = cfg.getBoolean("backup.broadcast-permission-only", true)
                 ? "worldbackup.notify" : null;
@@ -498,6 +508,9 @@ public final class BackupSettings {
      * <p>그 뒤의 진짜 flush 는 그 사이에 새로 더러워진 청크만 기다리면 된다.</p>
      */
     public long flushSettleMillis() { return flushSettleMillis; }
+
+    /** {@code backup.timezone}. 비어 있으면 서버 시계를 쓴다는 뜻이다. */
+    public String timezone() { return timezone; }
 
     public boolean oneBackEnabled() { return oneBackEnabled; }
 

@@ -1,6 +1,7 @@
 package io.github.yj.worldbackup.backup;
 
 import io.github.yj.worldbackup.config.BackupSettings;
+import io.github.yj.worldbackup.util.Clock;
 import io.github.yj.worldbackup.util.FileUtil;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -338,7 +339,7 @@ public class BackupRepository {
 
     private Instant parseIdInstant(String id, Path archive) {
         try {
-            return Instant.from(BackupEntry.ID_FORMAT.parse(id));
+            return Clock.parseId(id);
         } catch (Exception e) {
             try {
                 return Files.getLastModifiedTime(archive).toInstant();
@@ -487,7 +488,7 @@ public class BackupRepository {
             // 새벽에 사고가 나면 피해가 담긴 백업만 남겨 놓는다. 계단이 그 자리를 대신한다.
             keep.addAll(RetentionTiers.select(all, settings.tiers(), Instant.now()));
         } else if (settings.keepDaily() > 0) {
-            LocalDate today = LocalDate.now(ZoneId.systemDefault());
+            LocalDate today = Clock.today();
             LocalDate limit = today.minusDays(settings.keepDaily() - 1L);
             Map<LocalDate, BackupEntry> newestPerDay = new HashMap<>();
             for (BackupEntry entry : all) {

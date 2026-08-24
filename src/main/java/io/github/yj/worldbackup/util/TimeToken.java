@@ -83,6 +83,6 @@ public final class TimeToken {
     }
 
     public static Instant parse(String token) {
-        return parse(token, Instant.now(), ZoneId.systemDefault());
+        return parse(token, Instant.now(), Clock.zone());
     }
 }

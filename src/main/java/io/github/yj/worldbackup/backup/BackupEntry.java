@@ -1,10 +1,10 @@
 package io.github.yj.worldbackup.backup;
 
+import io.github.yj.worldbackup.util.Clock;
+
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
 
 /**
@@ -47,14 +47,10 @@ public record BackupEntry(
     public static final String LOCK_SUFFIX = ".locked";
     /** zip 내부에 함께 저장되는 메타데이터 엔트리 이름. */
     public static final String META_ENTRY = "worldbackup-meta.yml";
-
-    public static final DateTimeFormatter ID_FORMAT =
-            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneId.systemDefault());
-    public static final DateTimeFormatter DISPLAY_FORMAT =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss").withZone(ZoneId.systemDefault());
+    /** 시각은 모두 {@link Clock} 이 정한 시계로 적는다. 한 곳에서만 정해야 어긋나지 않는다. */
 
     public static String newId(Instant instant) {
-        return ID_FORMAT.format(instant);
+        return Clock.id(instant);
     }
 
     public static String archiveName(String id) {
@@ -85,11 +81,11 @@ public record BackupEntry(
     }
 
     public String displayTime() {
-        return DISPLAY_FORMAT.format(createdAt);
+        return Clock.display(createdAt);
     }
 
     public LocalDate localDate() {
-        return LocalDate.ofInstant(createdAt, ZoneId.systemDefault());
+        return Clock.date(createdAt);
     }
 
     public boolean hasLabel() {

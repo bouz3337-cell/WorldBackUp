@@ -7,6 +7,7 @@ import io.github.yj.worldbackup.config.BackupSettings;
 import io.github.yj.worldbackup.config.ConfigMigrator;
 import io.github.yj.worldbackup.restore.PendingRestore;
 import io.github.yj.worldbackup.restore.RestoreApplier;
+import io.github.yj.worldbackup.util.Clock;
 import io.github.yj.worldbackup.util.FileUtil;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
@@ -415,7 +416,7 @@ class UpgradeFromOneZeroSimulationTest {
     private static String legacyMeta(String id, Instant at, String baseId) {
         return "id: " + id + '\n'
                 + "created-at: " + at.toEpochMilli() + '\n'
-                + "created-at-text: " + BackupEntry.DISPLAY_FORMAT.format(at) + '\n'
+                + "created-at-text: " + Clock.display(at) + '\n'
                 + "type: SCHEDULED\n"
                 + "label: null\n"
                 + "original-bytes: 1048576\n"

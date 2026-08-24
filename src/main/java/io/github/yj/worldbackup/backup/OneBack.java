@@ -1,6 +1,7 @@
 package io.github.yj.worldbackup.backup;
 
 import io.github.yj.worldbackup.config.BackupSettings;
+import io.github.yj.worldbackup.util.Clock;
 import io.github.yj.worldbackup.util.FileUtil;
 
 import java.io.IOException;
@@ -9,8 +10,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -42,9 +41,6 @@ public final class OneBack {
 
     /** 다시 여는 방법을 적어 둔 안내문. 아카이브 밖에 둔다 - 풀기 전에 읽어야 하므로. */
     public static final String GUIDE_NAME = "읽어주세요.txt";
-
-    private static final DateTimeFormatter STAMP =
-            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneId.systemDefault());
 
     /**
      * 여유가 이만큼은 더 남아야 시작한다.
@@ -83,7 +79,7 @@ public final class OneBack {
     }
 
     public static Path archiveFor(Path directory, Instant at) {
-        return directory.resolve(PREFIX + STAMP.format(at) + SUFFIX);
+        return directory.resolve(PREFIX + Clock.id(at) + SUFFIX);
     }
 
     /** 이 폴더에 있는 OneBack 아카이브들. 최신순. */
@@ -326,7 +322,7 @@ public final class OneBack {
     private static String meta(Instant created, String requestedBy, int fileCount, long originalBytes) {
         return "kind: oneback\n"
                 + "created-at: " + created.toEpochMilli() + "\n"
-                + "created-at-text: " + BackupEntry.DISPLAY_FORMAT.format(created) + "\n"
+                + "created-at-text: " + Clock.display(created) + "\n"
                 + "requested-by: " + requestedBy + "\n"
                 + "file-count: " + fileCount + "\n"
                 + "original-bytes: " + originalBytes + "\n";
