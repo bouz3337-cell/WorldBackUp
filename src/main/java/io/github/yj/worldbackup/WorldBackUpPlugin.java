@@ -6,6 +6,7 @@ import io.github.yj.worldbackup.backup.BackupType;
 import io.github.yj.worldbackup.backup.OneBack;
 import io.github.yj.worldbackup.backup.PlayerData;
 import io.github.yj.worldbackup.backup.WorldLayout;
+import io.github.yj.worldbackup.backup.WorldScan;
 import io.github.yj.worldbackup.command.WorldBackUpCommand;
 import io.github.yj.worldbackup.config.BackupSettings;
 import io.github.yj.worldbackup.config.ConfigMigrator;
@@ -132,6 +133,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         reportPlayerData();
         runStartupHousekeeping();
         checkForUpdate();
+        checkWorlds();
 
         // 안전망: 백업이 돌지 않는데 자동 저장이 꺼진 월드가 남아 있으면 1분마다 되돌린다.
         watchdogTask = Sched.syncTimer(this, () -> backupService.thawLeftovers(), 20L * 60, 20L * 60);
@@ -675,6 +677,54 @@ public final class WorldBackUpPlugin extends JavaPlugin {
      * 실패하고, 리눅스에서는 성공해도 이미 올라간 클래스는 그대로라 반쯤 새 버전인 서버가
      * 된다. 이 폴더를 쓰면 옛 jar 가 함께 남는 문제까지 서버가 알아서 없애 준다.</p>
      */
+    /**
+     * 시작할 때 디스크의 월드를 훑어, 백업이 놓치고 있는 것을 알린다.
+     *
+     * <p>이것이 없으면 두 가지가 <b>조용히</b> 일어난다.</p>
+     * <ul>
+     *   <li>언로드된 월드가 백업에서 빠진다. 백업은 성공으로 끝나고 아무 말이 없다.</li>
+     *   <li>지형이나 플레이어 데이터가 사라진 월드가 <b>계속 백업된다.</b> 그러면 망가진
+     *       상태의 백업이 쌓이면서 멀쩡한 예전 백업이 보관 정책에 밀려 사라진다 -
+     *       복원 실패 정지({@link #restoreFailureHold})가 막으려는 것과 같은 연쇄다.</li>
+     * </ul>
+     *
+     * <p>크기는 재지 않는다. 그러면 월드 전체를 훑게 되어 부팅이 그만큼 늦어진다.
+     * 자세히 보려면 {@code /wb check}.</p>
+     */
+    private void checkWorlds() {
+        BackupSettings snapshot = settings;
+        if (snapshot == null) return;
+        try {
+            Sched.async(this, () -> {
+                List<WorldScan.World> onDisk = WorldScan.findOnDisk(snapshot.serverRoot());
+                if (onDisk.isEmpty()) return;
+
+                List<WorldScan.World> missing =
+                        WorldScan.missingFromBackup(onDisk, backedUpWorldFolders());
+                for (WorldScan.World world : onDisk) {
+                    for (String problem : WorldScan.problems(world)) {
+                        getLogger().warning("[점검] 월드 '" + world.name() + "' - " + problem);
+                    }
+                }
+                if (missing.isEmpty()) return;
+
+                getLogger().severe("==================================================================");
+                getLogger().severe("백업에 담기지 않는 월드가 " + missing.size() + "개 있습니다.");
+                for (WorldScan.World world : missing) {
+                    String relative = FileUtil.relativize(snapshot.serverRoot(), world.folder());
+                    getLogger().severe("  - " + (relative == null ? world.name() : relative));
+                }
+                getLogger().severe("백업은 로드된 월드만 봅니다."
+                        + " 플러그인이 만들어 두고 언로드한 월드는 빠집니다.");
+                getLogger().severe("담으시려면 config.yml 의 targets.extra-paths 에 위 경로를 넣고");
+                getLogger().severe("/wb reload 를 실행하세요. 자세히 보려면 /wb check.");
+                getLogger().severe("==================================================================");
+            });
+        } catch (Throwable ignored) {
+            // 스케줄러가 거부했다(종료 중). 점검 때문에 시작을 흔들 이유는 없다.
+        }
+    }
+
     /**
      * 지금 백업이 담고 있는 월드 폴더들.
      *

@@ -222,6 +222,38 @@ class WorldScanTest {
     }
 
     // ------------------------------------------------------------------
+    // 비용
+
+    /**
+     * 크기를 재지 않을 때는 <b>월드 전체를 훑지 않는다.</b>
+     *
+     * <p>이 검사는 서버가 켜질 때마다 돈다. 80만 파일짜리 월드를 매번 훑으면 그것만으로
+     * 부팅이 몇 초 늘어나고, 그러면 관리자는 검사를 꺼 버린다.</p>
+     */
+    @Test
+    void theStartupScanDoesNotWalkTheWholeWorld() throws IOException {
+        Path server = tmp.resolve("server");
+        Path world = world(server.resolve("world"));
+        write(world.resolve("region/r.0.0.mca"), "지형");
+        write(world.resolve("playerdata/uuid.dat"), "인벤토리");
+        for (int i = 0; i < 300; i++) {
+            write(world.resolve("region/r." + i + ".9.mca"), "덩어리");
+        }
+
+        WorldScan.World cheap = WorldScan.findOnDisk(server, false).get(0);
+        WorldScan.World full = WorldScan.findOnDisk(server, true).get(0);
+
+        // 판단은 양쪽이 같다
+        assertTrue(cheap.terrain());
+        assertTrue(cheap.playerData());
+        assertTrue(WorldScan.problems(cheap).isEmpty());
+
+        // 크기는 잰 쪽만 안다
+        assertEquals(0L, cheap.bytes(), "가벼운 검사는 크기를 재지 않는다");
+        assertTrue(full.bytes() > 0, "/wb check 는 크기까지 보여 준다");
+    }
+
+    // ------------------------------------------------------------------
 
     private static Path world(Path folder) throws IOException {
         Files.createDirectories(folder);

@@ -450,7 +450,7 @@ public final class WorldBackUpCommand {
         Msg.send(sender, "<gray>디스크의 월드를 훑어 봅니다...</gray>");
         Sched.async(plugin, () -> {
             BackupSettings settings = plugin.settings();
-            List<WorldScan.World> onDisk = WorldScan.findOnDisk(settings.serverRoot());
+            List<WorldScan.World> onDisk = WorldScan.findOnDisk(settings.serverRoot(), true);
             Set<Path> covered = plugin.backedUpWorldFolders();
             List<WorldScan.World> missing = WorldScan.missingFromBackup(onDisk, covered);
             Sched.syncQuietly(plugin, () -> reportCheck(sender, onDisk, covered, missing));

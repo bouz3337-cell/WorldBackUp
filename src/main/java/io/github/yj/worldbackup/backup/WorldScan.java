@@ -62,21 +62,31 @@ public final class WorldScan {
     }
 
     /**
-     * 서버 폴더에서 월드를 찾는다.
+     * 서버 폴더에서 월드를 찾는다. <b>크기는 재지 않는다.</b>
      *
      * <p>서버 폴더 자체는 월드로 보지 않는다. 그랬다가는 서버 전체가 월드 하나가 된다.</p>
      */
     public static List<World> findOnDisk(Path serverRoot) {
+        return findOnDisk(serverRoot, false);
+    }
+
+    /**
+     * @param measure 크기까지 잴지. <b>이 값이 true 면 월드의 모든 파일을 훑는다</b> -
+     *                80만 파일짜리 월드에서는 몇 초가 걸린다. 사람이 {@code /wb check} 를
+     *                쳤을 때만 켠다. 서버가 켜질 때마다 그 비용을 물릴 이유는 없다.
+     */
+    public static List<World> findOnDisk(Path serverRoot, boolean measure) {
         List<World> found = new ArrayList<>();
         if (serverRoot == null || !Files.isDirectory(serverRoot)) return found;
 
         Path root = serverRoot.toAbsolutePath().normalize();
-        collect(root, root, 0, found);
+        collect(root, root, 0, found, measure);
         found.sort(Comparator.comparing(World::name));
         return found;
     }
 
-    private static void collect(Path directory, Path serverRoot, int depth, List<World> found) {
+    private static void collect(Path directory, Path serverRoot, int depth, List<World> found,
+                                boolean measure) {
         if (depth > MAX_DEPTH) return;
         try (Stream<Path> children = Files.list(directory)) {
             for (Path child : children.toList()) {
@@ -85,26 +95,33 @@ public final class WorldScan {
                 if (SKIP.contains(name.toLowerCase(Locale.ROOT))) continue;
 
                 if (Files.isRegularFile(child.resolve(WorldLayout.LEVEL_MARKER))) {
-                    found.add(describe(child));
+                    found.add(describe(child, measure));
                     // 월드 안으로는 더 들어가지 않는다. 차원 폴더에도 level.dat 이 있는
                     // 버전이 있어서, 들어가면 한 월드가 여럿으로 세어진다.
                     continue;
                 }
-                collect(child, serverRoot, depth + 1, found);
+                collect(child, serverRoot, depth + 1, found, measure);
             }
         } catch (IOException ignored) {
             // 읽을 수 없는 폴더는 없는 것으로 본다. 검사 때문에 시작이 막히면 안 된다.
         }
     }
 
-    /** 이 월드에 무엇이 있는지 살펴본다. */
-    private static World describe(Path folder) {
+    /**
+     * 이 월드에 무엇이 있는지 살펴본다.
+     *
+     * <p>크기를 재지 않을 때는 <b>답이 정해지는 순간 멈춘다.</b> 지형과 플레이어 데이터가
+     * 둘 다 보이면 더 볼 것이 없다 - 대개 처음 몇십 개 파일 안에 끝난다. 서버가 켜질 때마다
+     * 도는 검사라, 여기서 월드 전체를 훑으면 그것만으로 부팅이 몇 초 늘어난다.</p>
+     */
+    private static World describe(Path folder, boolean measure) {
         boolean terrain = false;
         boolean playerData = false;
         long bytes = 0L;
 
         try (Stream<Path> walk = Files.walk(folder)) {
             for (Path path : walk.toList()) {
+                if (!measure && terrain && playerData) break; // 더 볼 것이 없다
                 if (Files.isDirectory(path)) {
                     String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
                     if (name.equals("playerdata") || name.equals("players")) playerData = true;
@@ -112,6 +129,7 @@ public final class WorldScan {
                 }
                 String name = path.getFileName().toString().toLowerCase(Locale.ROOT);
                 if (name.endsWith(".mca")) terrain = true;
+                if (!measure) continue;
                 try {
                     bytes += Files.size(path);
                 } catch (IOException ignored) {
