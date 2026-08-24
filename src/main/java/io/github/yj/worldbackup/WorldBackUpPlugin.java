@@ -639,7 +639,7 @@ public final class WorldBackUpPlugin extends JavaPlugin {
             Sched.async(this, () -> {
                 UpdateService service = new UpdateService(snapshot.updateRepository(), "WorldBackUp");
                 UpdateService.Outcome outcome = snapshot.updateAutoDownload()
-                        ? service.download(current, updateFolder())
+                        ? service.download(current, updateFolder(), jarName())
                         : service.check(current);
                 announceUpdate(outcome, current);
             });
@@ -675,6 +675,11 @@ public final class WorldBackUpPlugin extends JavaPlugin {
      * 실패하고, 리눅스에서는 성공해도 이미 올라간 클래스는 그대로라 반쯤 새 버전인 서버가
      * 된다. 이 폴더를 쓰면 옛 jar 가 함께 남는 문제까지 서버가 알아서 없애 준다.</p>
      */
+    /** 지금 돌고 있는 jar 의 파일 이름. 업데이트를 놓을 때 이 이름이어야 갈아 끼워진다. */
+    public String jarName() {
+        return getFile().getName();
+    }
+
     public Path updateFolder() {
         return getServer().getUpdateFolderFile().toPath();
     }

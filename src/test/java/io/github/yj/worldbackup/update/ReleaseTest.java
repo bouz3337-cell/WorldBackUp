@@ -187,6 +187,42 @@ class ReleaseTest {
     }
 
     // ------------------------------------------------------------------
+    // 어디에 놓을 것인가
+
+    /**
+     * 받은 jar 는 <b>지금 돌고 있는 jar 와 같은 이름</b>으로 놓아야 한다.
+     *
+     * <p>버킷은 시작할 때 {@code plugins/} 의 jar 마다 <b>같은 이름</b>의 파일이 업데이트
+     * 폴더에 있는지 보고, 있으면 그것으로 덮어쓴다. 이름이 다르면 아무 일도 일어나지 않는다 -
+     * 받아 둔 jar 가 업데이트 폴더에 조용히 눌러앉고, 관리자는 업데이트했다고 믿은 채
+     * <b>옛 버전을 계속 돌린다.</b></p>
+     *
+     * <p>이 플러그인은 파일 이름에 버전이 들어가므로({@code WorldBackUp-1.1.2.jar}) 그것이
+     * 기본값이 된다. 실제로 이 테스트를 쓰기 전까지 {@code WorldBackUp.jar} 로 놓고 있었다.</p>
+     */
+    @Test
+    void theDownloadKeepsTheNameOfTheJarItReplaces() {
+        assertEquals("WorldBackUp-1.1.2.jar",
+                UpdateService.stagedName("WorldBackUp-1.1.2.jar", "WorldBackUp"),
+                "이름이 다르면 버킷이 갈아 끼우지 않는다");
+        assertEquals("WorldBackUp.jar", UpdateService.stagedName("WorldBackUp.jar", "WorldBackUp"));
+        assertEquals("wb-plugin.jar", UpdateService.stagedName("wb-plugin.jar", "WorldBackUp"),
+                "관리자가 이름을 바꿔 두었어도 그 이름을 따른다");
+    }
+
+    /** 이름을 알 수 없거나 이상하면 안전한 기본값으로. 업데이트 폴더 밖에 쓰지 않는다. */
+    @Test
+    void aStrangeJarNameFallsBackInsteadOfEscaping() {
+        assertEquals("WorldBackUp.jar", UpdateService.stagedName(null, "WorldBackUp"));
+        assertEquals("WorldBackUp.jar", UpdateService.stagedName("", "WorldBackUp"));
+        assertEquals("WorldBackUp.jar", UpdateService.stagedName("plugins", "WorldBackUp"),
+                "jar 가 아니면 그 이름을 쓰지 않는다");
+        assertEquals("x.jar", UpdateService.stagedName("../../x.jar", "WorldBackUp"),
+                "경로가 섞여 들어오면 이름만 남긴다");
+        assertEquals("x.jar", UpdateService.stagedName("C:\\evil\\x.jar", "WorldBackUp"));
+    }
+
+    // ------------------------------------------------------------------
 
     private static String json(String tag, boolean draft, boolean prerelease, String assets) {
         return """

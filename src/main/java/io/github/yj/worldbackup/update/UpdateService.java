@@ -90,9 +90,11 @@ public final class UpdateService {
     /**
      * 확인하고, 새 버전이면 받아서 {@code updateFolder} 에 놓는다.
      *
-     * @param updateFolder {@code Bukkit.getUpdateFolderFile()}
+     * @param updateFolder  {@code Bukkit.getUpdateFolderFile()}
+     * @param currentJarName <b>지금 돌고 있는 jar 의 파일 이름.</b> 반드시 이 이름으로 놓아야 한다 -
+     *                       이유는 {@link #stagedName} 에 적어 두었다
      */
-    public Outcome download(String currentVersion, Path updateFolder) {
+    public Outcome download(String currentVersion, Path updateFolder, String currentJarName) {
         Outcome checked = check(currentVersion);
         if (!(checked instanceof Outcome.Available available)) return checked;
 
@@ -100,19 +102,49 @@ public final class UpdateService {
         Path temp = null;
         try {
             Files.createDirectories(updateFolder);
+            String name = stagedName(currentJarName, pluginName);
             // 받는 동안에는 .part 다. 도중에 서버가 죽어도 버킷이 반쪽짜리 jar 를 집어 가지
             // 않는다 - 그러면 다음 부팅에 서버가 뜨지 않는다.
-            temp = updateFolder.resolve(pluginName + "-" + release.version() + ".jar.part");
+            temp = updateFolder.resolve(name + ".part");
             downloadTo(release, temp);
             verify(temp, release.version());
 
-            Path target = updateFolder.resolve(pluginName + ".jar");
+            Path target = updateFolder.resolve(name);
             Files.move(temp, target, StandardCopyOption.REPLACE_EXISTING);
             return new Outcome.Staged(release, target);
         } catch (Exception e) {
             deleteQuietly(temp);
             return new Outcome.Failed(String.valueOf(e.getMessage()));
         }
+    }
+
+    /**
+     * {@code plugins/update/} 에 놓을 파일 이름.
+     *
+     * <p><b>지금 돌고 있는 jar 와 이름이 같아야 한다.</b> 버킷은 시작할 때
+     * {@code plugins/} 의 jar 마다 <b>같은 이름</b>의 파일이 업데이트 폴더에 있는지 보고,
+     * 있으면 그것으로 덮어쓴다. 이름이 다르면 아무 일도 일어나지 않는다 - 받아 둔 jar 가
+     * 업데이트 폴더에 <b>조용히 눌러앉고</b>, 관리자는 업데이트했다고 믿은 채 옛 버전을
+     * 계속 돌리게 된다. 파일 이름에 버전이 들어 있는 이 플러그인에서는 그것이 기본값이다
+     * ({@code WorldBackUp-1.1.2.jar} 를 쓰는 서버에 {@code WorldBackUp.jar} 를 놓는 셈).</p>
+     *
+     * <p>그래서 파일 이름은 바뀌지 않는다. {@code WorldBackUp-1.1.2.jar} 라는 이름 안에
+     * 1.3.0 이 들어 있게 된다. 헷갈리지만 이것이 버킷이 정한 방식이고, 이름을 바꾸는 것보다
+     * 낫다 - 갈아 끼워지지 않는 것보다는 이름이 낡은 편이 낫다.</p>
+     *
+     * @param currentJarName 지금 돌고 있는 jar 의 파일 이름
+     * @param fallback       그 이름을 알 수 없을 때 쓸 이름
+     */
+    static String stagedName(String currentJarName, String fallback) {
+        if (currentJarName == null) return fallback + ".jar";
+        String name = currentJarName.trim();
+        // 경로가 섞여 들어오면 업데이트 폴더 밖에 쓰게 된다.
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        if (slash >= 0) name = name.substring(slash + 1);
+        if (name.isEmpty() || !name.toLowerCase(java.util.Locale.ROOT).endsWith(".jar")) {
+            return fallback + ".jar";
+        }
+        return name;
     }
 
     // ------------------------------------------------------------------

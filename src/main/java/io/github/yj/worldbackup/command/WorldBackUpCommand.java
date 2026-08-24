@@ -447,7 +447,7 @@ public final class WorldBackUpCommand {
         Msg.send(sender, "<gray>새 버전이 있는지 확인합니다... <white>(" + settings.updateRepository() + ")</white></gray>");
         Sched.async(plugin, () -> {
             UpdateService service = new UpdateService(settings.updateRepository(), "WorldBackUp");
-            UpdateService.Outcome outcome = service.download(current, plugin.updateFolder());
+            UpdateService.Outcome outcome = service.download(current, plugin.updateFolder(), plugin.jarName());
             Sched.syncQuietly(plugin, () -> tell(sender, outcome, current));
         });
     }
