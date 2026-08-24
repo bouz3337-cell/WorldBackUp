@@ -6,7 +6,7 @@ group = "io.github.yj"
 
 // 1.0.0 이후 백업에 담기는 내용이 바뀌었다(플러그인 자기 config.yml 포함). 같은 버전 번호가
 // 서로 다른 동작을 갖지 않도록 올린다. 변경 내역은 CHANGELOG.md.
-version = "1.3.2"
+version = "1.4.0"
 
 repositories {
     mavenCentral()

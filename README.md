@@ -26,13 +26,13 @@
 
 ```bash
 ./gradlew build
-# 결과물: build/libs/WorldBackUp-1.3.2.jar
+# 결과물: build/libs/WorldBackUp-1.4.0.jar
 
 # 서버 plugins 폴더로 바로 복사하려면
 ./gradlew deployPlugin -PserverDir="D:/minecraft/server"
 ```
 
-`build/libs/WorldBackUp-1.3.2.jar` 를 서버의 `plugins/` 폴더에 넣고 재시작하면
+`build/libs/WorldBackUp-1.4.0.jar` 를 서버의 `plugins/` 폴더에 넣고 재시작하면
 `plugins/WorldBackUp/config.yml` 이 생성됩니다.
 
 빌드하지 않고 쓰시려면 [Releases](https://github.com/bouz3337-cell/WorldBackUp/releases) 에서
@@ -128,6 +128,7 @@ jar 를 내려받으세요. 버전을 올릴 때 무엇이 바뀌는지는 [CHAN
 | `/wb lock` / `/wb unlock` | 자동 삭제 보호 설정/해제 | `worldbackup.delete` |
 | `/wb prune` | 보관 정책을 지금 즉시 적용 | `worldbackup.delete` |
 | `/wb status` | 다음 백업 시각, 용량, 디스크 여유 | `worldbackup.use` |
+| `/wb check` | **디스크의 월드가 모두 백업에 담기는지 점검** | `worldbackup.use` |
 | `/wb reload` | config.yml 다시 불러오기 | `worldbackup.reload` |
 | `/wb update` | 새 버전 확인 후 받아 두기 (다음 재시작에 적용) | `worldbackup.reload` |
 

@@ -675,6 +675,32 @@ public final class WorldBackUpPlugin extends JavaPlugin {
      * 실패하고, 리눅스에서는 성공해도 이미 올라간 클래스는 그대로라 반쯤 새 버전인 서버가
      * 된다. 이 폴더를 쓰면 옛 jar 가 함께 남는 문제까지 서버가 알아서 없애 준다.</p>
      */
+    /**
+     * 지금 백업이 담고 있는 월드 폴더들.
+     *
+     * <p>{@code /wb check} 가 "디스크에는 있는데 백업에는 없는 월드" 를 가려내는 데 쓴다.
+     * 백업 대상은 로드된 월드에서 오므로, 언로드된 월드는 여기 없다 - 그 차이가 곧
+     * <b>조용히 빠지는 월드</b>다.</p>
+     *
+     * <p>{@code extra-paths} 로 직접 넣어 둔 경로도 함께 센다. 그것으로 언로드된 월드를
+     * 담아 두었다면 이미 백업되고 있는 것이므로 경고할 이유가 없다.</p>
+     */
+    public Set<Path> backedUpWorldFolders() {
+        BackupSettings snapshot = settings;
+        Set<Path> folders = new java.util.LinkedHashSet<>();
+        if (snapshot == null) return folders;
+
+        for (World world : Bukkit.getWorlds()) {
+            if (!snapshot.includesWorld(world.getName())) continue;
+            folders.add(WorldLayout.levelRoot(
+                    world.getWorldPath().toAbsolutePath().normalize(), snapshot.serverRoot()));
+        }
+        for (String relative : snapshot.extraPaths()) {
+            folders.add(snapshot.serverRoot().resolve(relative).toAbsolutePath().normalize());
+        }
+        return folders;
+    }
+
     /** 지금 돌고 있는 jar 의 파일 이름. 업데이트를 놓을 때 이 이름이어야 갈아 끼워진다. */
     public String jarName() {
         return getFile().getName();

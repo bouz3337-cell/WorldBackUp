@@ -13,6 +13,7 @@ import com.mojang.brigadier.tree.LiteralCommandNode;
 import io.github.yj.worldbackup.WorldBackUpPlugin;
 import io.github.yj.worldbackup.backup.BackupEntry;
 import io.github.yj.worldbackup.backup.OneBack;
+import io.github.yj.worldbackup.backup.WorldScan;
 import io.github.yj.worldbackup.update.UpdateService;
 import io.github.yj.worldbackup.backup.BackupRepository;
 import io.github.yj.worldbackup.backup.BackupType;
@@ -85,6 +86,10 @@ public final class WorldBackUpCommand {
                         .then(Commands.argument("메모", StringArgumentType.greedyString())
                                 .executes(ctx -> run(ctx, sender ->
                                         backup(sender, StringArgumentType.getString(ctx, "메모"))))))
+
+                .then(Commands.literal("check")
+                        .requires(source -> has(source.getSender(), "worldbackup.use"))
+                        .executes(ctx -> run(ctx, this::check)))
 
                 .then(Commands.literal("update")
                         .requires(source -> has(source.getSender(), "worldbackup.reload"))
@@ -404,6 +409,7 @@ public final class WorldBackUpCommand {
         line(sender, "/wb lock, /wb unlock [ID|번호]", "자동 삭제로부터 보호/해제합니다");
         line(sender, "/wb prune", "보관 정책을 지금 적용합니다");
         line(sender, "/wb status", "현재 상태를 봅니다");
+        line(sender, "/wb check", "디스크의 월드가 모두 백업에 담기는지 점검합니다");
         line(sender, "/wb reload", "설정을 다시 불러옵니다");
         line(sender, "/wb update", "새 버전이 있는지 확인하고 받아 둡니다");
         Msg.sendRaw(sender, "<dark_gray>번호는 <white>/wb list</white> 의 <white>#숫자</white>, <white>latest</white> 도 사용할 수 있습니다.</dark_gray>");
@@ -429,6 +435,63 @@ public final class WorldBackUpCommand {
                     Msg.send(sender, "<green>백업 완료</green> <white>" + entry.id() + "</white> <gray>("
                             + FileUtil.humanBytes(entry.archiveBytes()) + ", " + entry.fileCount() + "개 파일)</gray>");
                 }));
+    }
+
+    /**
+     * {@code /wb check} - 디스크의 월드를 훑어 백업이 그것을 담고 있는지 본다.
+     *
+     * <p>백업 대상은 {@code Bukkit.getWorlds()} 로 정해지는데 그것은 <b>로드된 월드만</b>
+     * 돌려준다. 플러그인이 만들어 두고 언로드한 월드는 디스크에 멀쩡히 있으면서도 백업에서
+     * 조용히 빠지고, 그 사실은 정작 되돌려야 하는 날에 드러난다. 여기서 미리 알려 준다.</p>
+     *
+     * <p>디스크를 훑으므로 <b>비동기</b>다. 월드가 크면 몇 초 걸린다.</p>
+     */
+    private void check(CommandSender sender) {
+        Msg.send(sender, "<gray>디스크의 월드를 훑어 봅니다...</gray>");
+        Sched.async(plugin, () -> {
+            BackupSettings settings = plugin.settings();
+            List<WorldScan.World> onDisk = WorldScan.findOnDisk(settings.serverRoot());
+            Set<Path> covered = plugin.backedUpWorldFolders();
+            List<WorldScan.World> missing = WorldScan.missingFromBackup(onDisk, covered);
+            Sched.syncQuietly(plugin, () -> reportCheck(sender, onDisk, covered, missing));
+        });
+    }
+
+    private void reportCheck(CommandSender sender, List<WorldScan.World> onDisk,
+                             Set<Path> covered, List<WorldScan.World> missing) {
+        Msg.sendRaw(sender, "<dark_gray>─────</dark_gray> <aqua>월드 점검</aqua> <dark_gray>─────</dark_gray>");
+        if (onDisk.isEmpty()) {
+            Msg.sendRaw(sender, " <yellow>디스크에서 월드를 찾지 못했습니다.</yellow>");
+            Msg.sendRaw(sender, " <gray>월드 폴더가 서버 폴더 밖에 있다면 정상입니다.</gray>");
+            return;
+        }
+
+        for (WorldScan.World world : onDisk) {
+            boolean backed = !missing.contains(world);
+            Msg.sendRaw(sender, " " + (backed ? "<green>✔</green>" : "<red>✖</red>")
+                    + " <white>" + world.name() + "</white> <dark_gray>("
+                    + FileUtil.humanBytes(world.bytes()) + ")</dark_gray>"
+                    + (backed ? " <gray>백업됨</gray>" : " <red>백업에서 빠짐</red>"));
+            for (String problem : WorldScan.problems(world)) {
+                Msg.sendRaw(sender, "     <yellow>· " + problem + "</yellow>");
+            }
+        }
+
+        if (missing.isEmpty()) {
+            Msg.sendRaw(sender, " <green>디스크의 월드가 모두 백업에 담깁니다.</green>");
+            return;
+        }
+
+        Msg.sendRaw(sender, "");
+        Msg.sendRaw(sender, " <red><bold>백업에서 빠지는 월드가 " + missing.size() + "개 있습니다.</bold></red>");
+        Msg.sendRaw(sender, " <gray>대개 플러그인이 만들어 두고 <white>언로드</white>해 둔 월드입니다. "
+                + "백업은 로드된 월드만 봅니다.</gray>");
+        Msg.sendRaw(sender, " <gray>담으시려면 config.yml 의 <white>targets.extra-paths</white> 에 넣고 "
+                + "<white>/wb reload</white> 하세요:</gray>");
+        for (WorldScan.World world : missing) {
+            String relative = FileUtil.relativize(plugin.settings().serverRoot(), world.folder());
+            Msg.sendRaw(sender, "   <white>- \"" + (relative == null ? world.name() : relative) + "\"</white>");
+        }
     }
 
     /**
