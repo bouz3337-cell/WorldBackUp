@@ -26,13 +26,13 @@
 
 ```bash
 ./gradlew build
-# 결과물: build/libs/WorldBackUp-1.4.0.jar
+# 결과물: build/libs/WorldBackUp-1.4.1.jar
 
 # 서버 plugins 폴더로 바로 복사하려면
 ./gradlew deployPlugin -PserverDir="D:/minecraft/server"
 ```
 
-`build/libs/WorldBackUp-1.4.0.jar` 를 서버의 `plugins/` 폴더에 넣고 재시작하면
+`build/libs/WorldBackUp-1.4.1.jar` 를 서버의 `plugins/` 폴더에 넣고 재시작하면
 `plugins/WorldBackUp/config.yml` 이 생성됩니다.
 
 빌드하지 않고 쓰시려면 [Releases](https://github.com/bouz3337-cell/WorldBackUp/releases) 에서
