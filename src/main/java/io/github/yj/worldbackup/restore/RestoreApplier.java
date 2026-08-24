@@ -123,8 +123,8 @@ public final class RestoreApplier {
             } catch (IOException ignored) {
             }
             log.severe("==================================================================");
-            log.severe("[WorldBackUp] 이전 복원 작업이 정상적으로 끝나지 않았습니다.");
-            log.severe("[WorldBackUp] 서버를 끄고 " + failed.getFileName() + " 와 월드 폴더를 확인하세요.");
+            log.severe("이전 복원 작업이 정상적으로 끝나지 않았습니다.");
+            log.severe("서버를 끄고 " + failed.getFileName() + " 와 월드 폴더를 확인하세요.");
             log.severe("==================================================================");
             PendingRestore.clear(dataFolder);
             return Set.of();
@@ -135,13 +135,13 @@ public final class RestoreApplier {
         try {
             Files.move(marker, processing, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
-            log.log(Level.SEVERE, "[WorldBackUp] 복원 예약 파일을 처리하지 못했습니다.", e);
+            log.log(Level.SEVERE, "복원 예약 파일을 처리하지 못했습니다.", e);
             return Set.of();
         }
 
         PendingRestore pending = PendingRestore.read(processing).orElse(null);
         if (pending == null) {
-            log.severe("[WorldBackUp] 복원 예약 파일이 손상되어 복원을 취소합니다.");
+            log.severe("복원 예약 파일이 손상되어 복원을 취소합니다.");
             deleteQuietly(processing);
             return Set.of();
         }
@@ -151,9 +151,9 @@ public final class RestoreApplier {
         String error = null;
 
         log.info("==================================================================");
-        log.info("[WorldBackUp] 복원을 시작합니다 : " + pending.id());
-        log.info("[WorldBackUp] 요청자          : " + pending.requestedBy());
-        log.info("[WorldBackUp] 백업 파일       : " + pending.archive());
+        log.info("복원을 시작합니다 : " + pending.id());
+        log.info("요청자          : " + pending.requestedBy());
+        log.info("백업 파일       : " + pending.archive());
         log.info("==================================================================");
 
         try {
@@ -205,21 +205,21 @@ public final class RestoreApplier {
             if (pending.keepReplaced()) {
                 replacedDir = dataFolder.resolve(REPLACED_FOLDER).resolve(STAMP.format(Instant.now()));
                 Files.createDirectories(replacedDir);
-                log.info("[WorldBackUp] 교체되는 기존 파일은 " + replacedDir + " 로 옮깁니다.");
+                log.info("교체되는 기존 파일은 " + replacedDir + " 로 옮깁니다.");
             }
 
             if (roots.isEmpty()) {
-                log.warning("[WorldBackUp] 백업 메타데이터에 대상 경로 정보가 없어, 기존 파일을 지우지 않고 "
+                log.warning("백업 메타데이터에 대상 경로 정보가 없어, 기존 파일을 지우지 않고 "
                         + "덮어쓰기만 수행합니다.");
             } else {
                 for (String root : roots) {
                     Path target = serverRoot.resolve(root).normalize();
                     if (!target.startsWith(serverRoot)) {
-                        log.warning("[WorldBackUp] 서버 폴더 밖의 대상은 건너뜁니다: " + root);
+                        log.warning("서버 폴더 밖의 대상은 건너뜁니다: " + root);
                         continue;
                     }
                     if (!Files.exists(target)) continue;
-                    log.info("[WorldBackUp] 기존 데이터 정리: " + root);
+                    log.info("기존 데이터 정리: " + root);
                     if (Files.isDirectory(target)) {
                         clearDirectory(target, serverRoot, preserve, replacedDir, stats, log);
                     } else {
@@ -244,18 +244,18 @@ public final class RestoreApplier {
 
         } catch (Throwable t) {
             error = String.valueOf(t.getMessage());
-            log.log(Level.SEVERE, "[WorldBackUp] 복원 중 오류가 발생했습니다.", t);
+            log.log(Level.SEVERE, "복원 중 오류가 발생했습니다.", t);
         }
 
         long elapsed = System.currentTimeMillis() - startedAt;
         log.info("==================================================================");
         if (error == null) {
-            log.info("[WorldBackUp] 복원 완료! 복원 " + stats.restored + "개 파일 ("
+            log.info("복원 완료! 복원 " + stats.restored + "개 파일 ("
                     + FileUtil.humanBytes(stats.restoredBytes) + "), 제거 " + stats.removed
                     + "개, 유지 " + stats.preserved + "개, 실패 " + stats.failed + "개, "
                     + FileUtil.humanMillis(elapsed));
         } else {
-            log.severe("[WorldBackUp] 복원이 완전하지 않습니다: " + error);
+            log.severe("복원이 완전하지 않습니다: " + error);
         }
         log.info("==================================================================");
 
@@ -294,13 +294,13 @@ public final class RestoreApplier {
                     + "월드를 확인한 뒤 이 파일을 지우고 /wb reload 를 실행하세요.");
             Files.writeString(marker, yaml.saveToString(), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            log.log(Level.SEVERE, "[WorldBackUp] 복원 실패 기록을 남기지 못했습니다.", e);
+            log.log(Level.SEVERE, "복원 실패 기록을 남기지 못했습니다.", e);
             return;
         }
         log.severe("==================================================================");
-        log.severe("[WorldBackUp] 복원이 실패해 " + marker.getFileName() + " 을 남겼습니다.");
-        log.severe("[WorldBackUp] 이 파일이 있는 동안 자동 백업과 보관 정리를 멈춥니다.");
-        log.severe("[WorldBackUp] 월드를 확인한 뒤 파일을 지우고 /wb reload 를 실행하세요.");
+        log.severe("복원이 실패해 " + marker.getFileName() + " 을 남겼습니다.");
+        log.severe("이 파일이 있는 동안 자동 백업과 보관 정리를 멈춥니다.");
+        log.severe("월드를 확인한 뒤 파일을 지우고 /wb reload 를 실행하세요.");
         log.severe("==================================================================");
     }
 
@@ -310,9 +310,9 @@ public final class RestoreApplier {
             Path resolved = marker.resolveSibling(marker.getFileName() + RESOLVED_SUFFIX);
             try {
                 Files.move(marker, resolved, StandardCopyOption.REPLACE_EXISTING);
-                log.info("[WorldBackUp] 복원이 성공해 이전 실패 기록을 해제했습니다: " + resolved.getFileName());
+                log.info("복원이 성공해 이전 실패 기록을 해제했습니다: " + resolved.getFileName());
             } catch (IOException e) {
-                log.warning("[WorldBackUp] 이전 실패 기록을 해제하지 못했습니다: " + marker.getFileName());
+                log.warning("이전 실패 기록을 해제하지 못했습니다: " + marker.getFileName());
             }
         }
     }
@@ -353,16 +353,16 @@ public final class RestoreApplier {
         if (missing.isEmpty()) return;
 
         missing.sort(null);
-        log.warning("[WorldBackUp] 백업 당시 끝까지 읽지 못한 파일이 " + missing.size()
+        log.warning("백업 당시 끝까지 읽지 못한 파일이 " + missing.size()
                 + "개 있습니다. (서버가 그 파일에 쓰고 있었거나 디스크 오류)");
         log.warning(hasBase
-                ? "[WorldBackUp] 기준 백업에 예전 판이 있으면 그것으로 되돌리고, 없으면 그대로 둡니다."
-                : "[WorldBackUp] 이 파일들은 복원하지 않습니다. 잘린 파일을 풀면 데이터가 깨집니다.");
+                ? "기준 백업에 예전 판이 있으면 그것으로 되돌리고, 없으면 그대로 둡니다."
+                : "이 파일들은 복원하지 않습니다. 잘린 파일을 풀면 데이터가 깨집니다.");
         for (String name : missing.subList(0, Math.min(missing.size(), UNSTORED_LOG_LIMIT))) {
-            log.warning("[WorldBackUp]   - " + name);
+            log.warning("  - " + name);
         }
         if (missing.size() > UNSTORED_LOG_LIMIT) {
-            log.warning("[WorldBackUp]   … " + (missing.size() - UNSTORED_LOG_LIMIT) + "개 더");
+            log.warning("  … " + (missing.size() - UNSTORED_LOG_LIMIT) + "개 더");
         }
     }
 
@@ -406,7 +406,7 @@ public final class RestoreApplier {
             if (withData.contains(root)) {
                 covered.add(root);
             } else {
-                log.warning("[WorldBackUp] 백업에 '" + root + "' 데이터가 없어 이 경로는 건드리지 않습니다. "
+                log.warning("백업에 '" + root + "' 데이터가 없어 이 경로는 건드리지 않습니다. "
                         + "(백업 시점에 비어 있었을 수 있습니다)");
             }
         }
@@ -445,7 +445,7 @@ public final class RestoreApplier {
         if (needed <= 0) return;
 
         long free = FileUtil.usableSpace(serverRoot);
-        log.info("[WorldBackUp] 복원에 쓰이는 공간 " + FileUtil.humanBytes(needed)
+        log.info("복원에 쓰이는 공간 " + FileUtil.humanBytes(needed)
                 + " · 남은 공간 " + FileUtil.humanBytes(free));
 
         if (hasRoomToRestore(needed, free)) return;
@@ -454,17 +454,17 @@ public final class RestoreApplier {
         // 밀어낸 옛 월드가 몇 벌씩 들어 있어서, 정작 되돌려야 하는 순간에 그것이 길을 막는
         // 일이 생긴다. 지우는 기준은 평소와 똑같은 keep-replaced-max 이므로 보관 정책이
         // 달라지지는 않는다 - 정리 시점만 복원 뒤에서 복원 앞으로 옮기는 것이다.
-        log.warning("[WorldBackUp] 공간이 모자랍니다. 오래된 replaced/ 스냅샷부터 정리합니다.");
+        log.warning("공간이 모자랍니다. 오래된 replaced/ 스냅샷부터 정리합니다.");
         cleanupReplaced(dataFolder, pending.keepReplacedMax(), log);
         free = FileUtil.usableSpace(serverRoot);
         if (hasRoomToRestore(needed, free)) {
-            log.info("[WorldBackUp] 정리 후 남은 공간 " + FileUtil.humanBytes(free) + " - 복원을 계속합니다.");
+            log.info("정리 후 남은 공간 " + FileUtil.humanBytes(free) + " - 복원을 계속합니다.");
             return;
         }
 
         if (!pending.keepReplaced()) {
             // 지우면서 공간이 돌아오므로 성공할 수도 있다. 막지 않는다.
-            log.warning("[WorldBackUp] 남은 공간이 복원할 양보다 적습니다. 기존 데이터를 지우며"
+            log.warning("남은 공간이 복원할 양보다 적습니다. 기존 데이터를 지우며"
                     + " 확보되는 공간에 기대야 합니다. 도중에 끊기면 replaced/ 사본이 없다는 점을"
                     + " 유념하세요. (restore.keep-replaced-files 가 꺼져 있습니다)");
             return;
@@ -569,12 +569,12 @@ public final class RestoreApplier {
                 }
             }
         }
-        log.info("[WorldBackUp] 검사 통과 - 복원 대상 " + finalFiles.size() + "개 파일");
+        log.info("검사 통과 - 복원 대상 " + finalFiles.size() + "개 파일");
     }
 
     /** 아카이브를 끝까지 읽어 CRC 를 검사하고, 들어 있는 데이터 파일 이름을 돌려준다. */
     private static Set<String> readAndCheck(Path archive, Logger log) throws IOException {
-        log.info("[WorldBackUp] 백업 파일을 검사합니다: " + archive.getFileName()
+        log.info("백업 파일을 검사합니다: " + archive.getFileName()
                 + " (" + FileUtil.humanBytes(Files.size(archive)) + ")");
 
         byte[] buffer = new byte[128 * 1024];
@@ -603,7 +603,7 @@ public final class RestoreApplier {
                 long now = System.currentTimeMillis();
                 if (now - lastLog > 5_000L) {
                     lastLog = now;
-                    log.info("[WorldBackUp] 검사 중... " + names.size() + "개 파일 ("
+                    log.info("검사 중... " + names.size() + "개 파일 ("
                             + FileUtil.humanBytes(bytes) + ")");
                 }
             }
@@ -638,9 +638,9 @@ public final class RestoreApplier {
         for (Path old : snapshots.subList(keep, snapshots.size())) {
             List<Path> failed = FileUtil.deleteRecursively(old);
             if (failed.isEmpty()) {
-                log.info("[WorldBackUp] 오래된 replaced 스냅샷을 정리했습니다: " + old.getFileName());
+                log.info("오래된 replaced 스냅샷을 정리했습니다: " + old.getFileName());
             } else {
-                log.warning("[WorldBackUp] replaced 스냅샷 일부를 지우지 못했습니다: " + old.getFileName());
+                log.warning("replaced 스냅샷 일부를 지우지 못했습니다: " + old.getFileName());
             }
         }
     }
@@ -699,7 +699,7 @@ public final class RestoreApplier {
             @Override
             public FileVisitResult visitFileFailed(Path file, IOException exc) {
                 stats.failed++;
-                log.warning("[WorldBackUp] 접근 실패: " + file + " (" + exc.getMessage() + ")");
+                log.warning("접근 실패: " + file + " (" + exc.getMessage() + ")");
                 return FileVisitResult.CONTINUE;
             }
 
@@ -737,7 +737,7 @@ public final class RestoreApplier {
             stats.removed++;
         } catch (IOException e) {
             stats.failed++;
-            log.warning("[WorldBackUp] 파일을 정리하지 못했습니다: " + relative + " (" + e.getMessage() + ")");
+            log.warning("파일을 정리하지 못했습니다: " + relative + " (" + e.getMessage() + ")");
         }
     }
 
@@ -781,7 +781,7 @@ public final class RestoreApplier {
 
                 Path out = serverRoot.resolve(name).normalize();
                 if (!out.startsWith(serverRoot)) { // zip slip 방지
-                    log.warning("[WorldBackUp] 비정상 경로를 건너뜁니다: " + name);
+                    log.warning("비정상 경로를 건너뜁니다: " + name);
                     continue;
                 }
 
@@ -805,13 +805,13 @@ public final class RestoreApplier {
                     if (UserLists.NOTABLE.contains(name)) stats.notable.add(name);
                 } catch (IOException e) {
                     stats.failed++;
-                    log.warning("[WorldBackUp] 복원 실패: " + name + " (" + e.getMessage() + ")");
+                    log.warning("복원 실패: " + name + " (" + e.getMessage() + ")");
                 }
 
                 long now = System.currentTimeMillis();
                 if (now - lastLog > 5_000L) {
                     lastLog = now;
-                    log.info("[WorldBackUp] 복원 중... " + stats.restored + "개 파일 ("
+                    log.info("복원 중... " + stats.restored + "개 파일 ("
                             + FileUtil.humanBytes(stats.restoredBytes) + ")");
                 }
             }
@@ -848,7 +848,7 @@ public final class RestoreApplier {
             Files.writeString(dataFolder.resolve(PendingRestore.REPORT_NAME),
                     yaml.saveToString(), StandardCharsets.UTF_8);
         } catch (IOException e) {
-            log.log(Level.WARNING, "[WorldBackUp] 복원 보고서를 저장하지 못했습니다.", e);
+            log.log(Level.WARNING, "복원 보고서를 저장하지 못했습니다.", e);
         }
     }
 

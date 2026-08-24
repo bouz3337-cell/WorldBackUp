@@ -234,17 +234,17 @@ public final class WorldBackUpPlugin extends JavaPlugin {
      */
     private void announceMigration(ConfigMigrator.Result result) {
         getLogger().info("==================================================================");
-        getLogger().info("[WorldBackUp] 업데이트된 버전으로 시작합니다. config.yml 에 새 설정을 넣었습니다.");
-        getLogger().info("[WorldBackUp]   " + String.join(", ", result.added()));
+        getLogger().info("업데이트된 버전으로 시작합니다. config.yml 에 새 설정을 넣었습니다.");
+        getLogger().info("  " + String.join(", ", result.added()));
         if (!result.guarded().isEmpty()) {
-            getLogger().info("[WorldBackUp]");
-            getLogger().info("[WorldBackUp] 이 중 아래는 <b>지금 동작을 그대로 두는 값</b>으로 넣었습니다."
+            getLogger().info("");
+            getLogger().info("이 중 아래는 <b>지금 동작을 그대로 두는 값</b>으로 넣었습니다."
                     .replace("<b>", "").replace("</b>", ""));
             for (String path : result.guarded()) {
-                getLogger().info("[WorldBackUp]   - " + path);
+                getLogger().info("  - " + path);
             }
-            getLogger().info("[WorldBackUp] jar 를 바꾸는 것만으로 백업이 지워지거나 커지지 않게 하기 위함입니다.");
-            getLogger().info("[WorldBackUp] 쓰시려면 config.yml 의 해당 설명을 읽고 값을 바꾼 뒤 /wb reload 하세요.");
+            getLogger().info("jar 를 바꾸는 것만으로 백업이 지워지거나 커지지 않게 하기 위함입니다.");
+            getLogger().info("쓰시려면 config.yml 의 해당 설명을 읽고 값을 바꾼 뒤 /wb reload 하세요.");
         }
         getLogger().info("==================================================================");
     }
@@ -285,13 +285,13 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         if (others.isEmpty()) return;
 
         getLogger().severe("==================================================================");
-        getLogger().severe("[WorldBackUp] plugins 폴더에 WorldBackUp jar 가 " + (others.size() + 1) + "개 있습니다.");
-        getLogger().severe("[WorldBackUp]   지금 돌고 있는 것: " + own.getFileName());
+        getLogger().severe("plugins 폴더에 WorldBackUp jar 가 " + (others.size() + 1) + "개 있습니다.");
+        getLogger().severe("  지금 돌고 있는 것: " + own.getFileName());
         for (Path other : others) {
-            getLogger().severe("[WorldBackUp]   그 외          : " + other.getFileName());
+            getLogger().severe("  그 외          : " + other.getFileName());
         }
-        getLogger().severe("[WorldBackUp] 업데이트할 때 옛 jar 를 지우지 않으면 어느 쪽이 올라올지 알 수 없습니다.");
-        getLogger().severe("[WorldBackUp] 서버를 끄고 쓰지 않는 jar 를 지운 뒤 다시 켜세요.");
+        getLogger().severe("업데이트할 때 옛 jar 를 지우지 않으면 어느 쪽이 올라올지 알 수 없습니다.");
+        getLogger().severe("서버를 끄고 쓰지 않는 jar 를 지운 뒤 다시 켜세요.");
         getLogger().severe("==================================================================");
     }
 
@@ -355,14 +355,14 @@ public final class WorldBackUpPlugin extends JavaPlugin {
         if (!restoreFailureHold) return;
 
         getLogger().severe("==================================================================");
-        getLogger().severe("[WorldBackUp] 처리되지 않은 복원 실패 기록이 " + markers.size() + "개 있습니다.");
+        getLogger().severe("처리되지 않은 복원 실패 기록이 " + markers.size() + "개 있습니다.");
         for (Path marker : markers) {
-            getLogger().severe("[WorldBackUp]   - " + marker.getFileName());
+            getLogger().severe("  - " + marker.getFileName());
         }
-        getLogger().severe("[WorldBackUp] 월드가 온전하지 않을 수 있어 자동 백업과 보관 정리를 멈춥니다.");
-        getLogger().severe("[WorldBackUp] 그대로 두면 깨진 상태가 백업되면서 멀쩡한 백업이 밀려납니다.");
-        getLogger().severe("[WorldBackUp] 월드를 확인한 뒤 위 파일을 지우고 /wb reload 를 실행하세요.");
-        getLogger().severe("[WorldBackUp] (수동 /wb backup, /wb restore 는 그대로 쓸 수 있습니다)");
+        getLogger().severe("월드가 온전하지 않을 수 있어 자동 백업과 보관 정리를 멈춥니다.");
+        getLogger().severe("그대로 두면 깨진 상태가 백업되면서 멀쩡한 백업이 밀려납니다.");
+        getLogger().severe("월드를 확인한 뒤 위 파일을 지우고 /wb reload 를 실행하세요.");
+        getLogger().severe("(수동 /wb backup, /wb restore 는 그대로 쓸 수 있습니다)");
         getLogger().severe("==================================================================");
     }
 
@@ -651,20 +651,20 @@ public final class WorldBackUpPlugin extends JavaPlugin {
     private void announceUpdate(UpdateService.Outcome outcome, String current) {
         if (outcome instanceof UpdateService.Outcome.Available available) {
             getLogger().warning("==================================================================");
-            getLogger().warning("[WorldBackUp] 새 버전이 있습니다: " + current
+            getLogger().warning("새 버전이 있습니다: " + current
                     + " -> " + available.release().version());
-            getLogger().warning("[WorldBackUp] /wb update 를 치면 받아 두고, 다음 재시작에 적용됩니다.");
-            getLogger().warning("[WorldBackUp] " + available.release().pageUrl());
+            getLogger().warning("/wb update 를 치면 받아 두고, 다음 재시작에 적용됩니다.");
+            getLogger().warning("" + available.release().pageUrl());
             getLogger().warning("==================================================================");
         } else if (outcome instanceof UpdateService.Outcome.Staged staged) {
             getLogger().warning("==================================================================");
-            getLogger().warning("[WorldBackUp] 새 버전 " + staged.release().version() + " 을 받아 두었습니다.");
-            getLogger().warning("[WorldBackUp] 서버를 다시 켜면 자동으로 갈아 끼워집니다.");
-            getLogger().warning("[WorldBackUp] (update.auto-download 가 켜져 있습니다)");
+            getLogger().warning("새 버전 " + staged.release().version() + " 을 받아 두었습니다.");
+            getLogger().warning("서버를 다시 켜면 자동으로 갈아 끼워집니다.");
+            getLogger().warning("(update.auto-download 가 켜져 있습니다)");
             getLogger().warning("==================================================================");
         } else if (outcome instanceof UpdateService.Outcome.Failed failed) {
             // 인터넷이 없는 서버가 흔하다. 부팅마다 경고를 띄울 일이 아니다.
-            getLogger().fine("[WorldBackUp] 업데이트 확인 실패: " + failed.reason());
+            getLogger().fine("업데이트 확인 실패: " + failed.reason());
         }
     }
 
