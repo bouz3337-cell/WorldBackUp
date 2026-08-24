@@ -174,6 +174,41 @@ class OneBackTest {
     }
 
     /**
+     * 자리가 모자라면 <b>가장 오래된 것을 내주고</b> 만든다. 다만 마지막 한 벌은 남긴다.
+     *
+     * <p>아카이브 두 벌이 있는 서버에서 새 한 벌을 만들려면 잠깐 <b>세 벌만큼</b>의 자리가
+     * 필요하다. 할당량이 빠듯한 호스팅에서는 그 순간을 넘기지 못해 영영 새것을 만들지 못하고,
+     * 폴더에는 낡은 두 벌만 남는다 - 자기 옛 사본이 자기 갱신을 막는 셈이다.</p>
+     *
+     * <p>그렇다고 마지막 한 벌까지 내주면 안 된다. 그것을 지우고 새로 만들다 실패하면 손에
+     * 아무것도 남지 않는데, 이 파일은 <b>서버가 통째로 사라졌을 때</b>를 위한 것이다.</p>
+     */
+    @Test
+    void roomIsMadeFromOldArchivesButNeverTheLastOne() {
+        assertEquals(1, OneBack.freeableDownTo(2), "두 벌이면 한 벌까지 줄여 자리를 만든다");
+        assertEquals(2, OneBack.freeableDownTo(3));
+        assertEquals(1, OneBack.freeableDownTo(1), "한 벌뿐이면 내줄 것이 없다");
+        assertEquals(1, OneBack.freeableDownTo(0), "설정이 이상해도 마지막 한 벌은 지킨다");
+        assertEquals(1, OneBack.freeableDownTo(-5));
+    }
+
+    /** 그 규칙대로 실제로 지워지는지. keep 이 1 이면 하나뿐인 아카이브가 살아남아야 한다. */
+    @Test
+    void theLastArchiveSurvivesEvenWhenMakingRoom() throws IOException {
+        Path directory = tmp.resolve("OneBack");
+        write(directory.resolve(OneBack.PREFIX + "20260101-000000" + OneBack.SUFFIX), "하나뿐");
+
+        assertEquals(0, OneBack.prune(directory, OneBack.freeableDownTo(1), LOG));
+        assertEquals(1, OneBack.list(directory).size(), "지우고 나면 되돌릴 것이 없다");
+
+        // 두 벌이면 한 벌을 내준다
+        write(directory.resolve(OneBack.PREFIX + "20260102-000000" + OneBack.SUFFIX), "새것");
+        assertEquals(1, OneBack.prune(directory, OneBack.freeableDownTo(2), LOG));
+        assertEquals(OneBack.PREFIX + "20260102-000000" + OneBack.SUFFIX,
+                OneBack.list(directory).get(0).getFileName().toString(), "최신이 남는다");
+    }
+
+    /**
      * 공간이 모자라면 <b>아무것도 만들지 않고</b> 멈춘다.
      *
      * <p>반쯤 쓰다 만 아카이브를 남기면 그것이 진짜 백업인 줄 알고 챙겨 갈 수 있다.</p>

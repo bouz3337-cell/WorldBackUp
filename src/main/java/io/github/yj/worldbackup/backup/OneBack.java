@@ -197,6 +197,57 @@ public final class OneBack {
     }
 
     /**
+     * 자리를 만들려고 <b>몇 개까지 줄여도 되는지.</b>
+     *
+     * <p>{@code public} 인 이유는 하나뿐이다 - 이 숫자가 0 이 되면 <b>마지막 남은 아카이브를
+     * 지우고</b> 새것을 만들다 실패했을 때 손에 아무것도 남지 않는다. 이 파일은 "서버가
+     * 통째로 사라졌을 때" 를 위한 것이라, 낡은 한 벌이라도 있는 편이 없는 것보다 낫다.
+     * 그 경계를 테스트로 못 박아 둔다.</p>
+     */
+    public static int freeableDownTo(int keep) {
+        return Math.max(1, keep - 1);
+    }
+
+    /**
+     * 시작할 자리를 만든다. 모자라면 <b>가장 오래된 아카이브를 내주고</b> 다시 본다.
+     *
+     * <p>이것이 없으면 이상한 일이 벌어진다 - 아카이브 두 벌이 이미 있는 서버에서 새 한 벌을
+     * 만들려면 잠깐 <b>세 벌만큼</b>의 자리가 필요하다. 할당량이 빠듯한 호스팅에서는 그
+     * 순간을 넘기지 못해 <b>영영 새 아카이브를 만들지 못한다.</b> 그러면 폴더에는 낡은 두 벌만
+     * 남고, 정작 서버를 잃는 날 몇 달 전 상태로 돌아가게 된다. 자기 옛 사본이 자기 갱신을
+     * 막는 셈이다.</p>
+     *
+     * <p>그래서 자리가 모자라면 가장 오래된 것을 먼저 내준다. 평소 정책({@code keep})을
+     * 어기는 것이 아니라, <b>적용 시점만</b> 뒤에서 앞으로 옮기는 것이다 - 어차피 새것이
+     * 만들어지면 지워질 것이었다.</p>
+     *
+     * <p><b>마지막 한 벌은 절대 내주지 않는다.</b> 그것을 지우고 새로 만들다 실패하면 손에
+     * 아무것도 남지 않는다. 이 파일은 "서버가 통째로 사라졌을 때" 를 위한 것이라, 낡은
+     * 한 벌이라도 있는 편이 없는 것보다 낫다. 그 경우에는 만들지 않고 사람에게 알린다.</p>
+     */
+    private static void ensureRoom(Path directory, long expected, int keep, Logger log) throws IOException {
+        long free = FileUtil.usableSpace(directory);
+        log.info("[OneBack] 담을 양 " + FileUtil.humanBytes(expected)
+                + " · 남은 공간 " + FileUtil.humanBytes(free));
+        if (hasRoom(expected, free)) return;
+
+        if (prune(directory, freeableDownTo(keep), log) > 0) {
+            free = FileUtil.usableSpace(directory);
+            if (hasRoom(expected, free)) {
+                log.warning("[OneBack] 자리가 모자라 오래된 아카이브를 먼저 내줬습니다. "
+                        + "남은 공간 " + FileUtil.humanBytes(free));
+                return;
+            }
+        }
+
+        throw new IOException("디스크 여유 공간이 부족해 OneBack 을 만들지 않았습니다. 필요: "
+                + FileUtil.humanBytes(expected + HEADROOM_BYTES)
+                + ", 남음: " + FileUtil.humanBytes(free)
+                + " - 가지고 있는 아카이브는 그대로 두었습니다."
+                + " oneback.directory 를 여유 있는 다른 디스크로 옮기거나, 서버 폴더를 줄이세요.");
+    }
+
+    /**
      * 서버 폴더를 통째로 담는다. <b>비동기 스레드에서 부른다.</b>
      *
      * <p>월드를 얼리고 청크를 내려쓰는 것은 호출자({@link BackupService})가 이미 해 두었다는
@@ -223,16 +274,7 @@ public final class OneBack {
             sizes = sizes.plus(FileUtil.measure(target, serverRoot, settings.oneBackExclude(), null));
         }
         long expected = sizes.totalBytes();
-        long free = FileUtil.usableSpace(archive.getParent());
-        log.info("[OneBack] 담을 양 " + FileUtil.humanBytes(expected)
-                + " · 남은 공간 " + FileUtil.humanBytes(free));
-        if (!hasRoom(expected, free)) {
-            throw new IOException("디스크 여유 공간이 부족해 OneBack 을 만들지 않았습니다. 필요: "
-                    + FileUtil.humanBytes(expected + HEADROOM_BYTES)
-                    + ", 남음: " + FileUtil.humanBytes(free)
-                    + " - 다른 디스크를 쓰시려면 oneback.directory 를 절대 경로로 지정하거나,"
-                    + " oneback.keep 을 줄여 옛 아카이브를 정리하세요.");
-        }
+        ensureRoom(archive.getParent(), expected, settings.oneBackKeep(), log);
 
         Instant created = Instant.now();
         Archiver.Result result = Archiver.create(
