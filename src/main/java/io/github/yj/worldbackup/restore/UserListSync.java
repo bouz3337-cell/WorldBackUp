@@ -9,6 +9,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -45,13 +46,25 @@ public final class UserListSync {
      * @param serverRoot 서버 실행 폴더 ({@code ops.json} 이 있는 곳)
      */
     public static void apply(Set<String> restored, Path serverRoot, Logger log) {
+        apply(restored, serverRoot, log, new BukkitRoster());
+    }
+
+    /**
+     * 명단을 고칠 상대를 밖에서 넘기는 판.
+     *
+     * <p>{@code public} 인 이유는 하나뿐이다 - <b>테스트가 이 경로를 실제로 돌려 봐야 한다.</b>
+     * 이 클래스는 "op 목록이 복원 뒤에도 그대로였다" 는 사고를 고치려고 만든 것인데, 정작
+     * {@link Bukkit} 정적 호출에 묶여 있어 이 프로젝트에서 유일하게 검증 못 하는 복원 코드였다.
+     * 가장 중요한 자리가 가장 안 보이는 자리이면 안 된다.</p>
+     */
+    public static void apply(Set<String> restored, Path serverRoot, Logger log, Roster roster) {
         if (restored == null || restored.isEmpty()) return;
 
         if (restored.contains(UserLists.OPS)) {
-            guard(log, UserLists.OPS, () -> syncOps(serverRoot, log));
+            guard(log, UserLists.OPS, () -> syncOps(serverRoot, log, roster));
         }
         if (restored.contains(UserLists.WHITELIST)) {
-            guard(log, UserLists.WHITELIST, () -> syncWhitelist(serverRoot, log));
+            guard(log, UserLists.WHITELIST, () -> syncWhitelist(serverRoot, log, roster));
         }
         // 밴 목록은 여기 없다. 복원이 아예 건드리지 않기 때문이다 -
         // {@link UserLists#NEVER_RESTORED} 참고. 밴한 사람은 되돌린 뒤에도 밴인 채로 남는다.
@@ -77,7 +90,7 @@ public final class UserListSync {
     // ------------------------------------------------------------------
     // op
 
-    private static void syncOps(Path serverRoot, Logger log) {
+    private static void syncOps(Path serverRoot, Logger log, Roster roster) {
         Path file = serverRoot.resolve(UserLists.OPS);
         List<UserLists.Op> wanted;
         try {
@@ -87,11 +100,15 @@ public final class UserListSync {
             return;
         }
 
-        Map<UUID, OfflinePlayer> live = byUuid(Bukkit.getOperators());
+        Set<UUID> live = roster.operators();
         Map<UUID, String> names = new LinkedHashMap<>();
         for (UserLists.Op op : wanted) names.put(op.uuid(), op.name());
 
-        UserLists.Diff<UUID> diff = UserLists.diff(live.keySet(), names.keySet());
+        // 비교하는 것은 "누가 op 인가" 뿐이다. level 은 Bukkit API 로 읽을 수도 쓸 수도 없어서
+        // (NMS 없이는) 사람이 같으면 여기서 끝낸다. 파일에는 백업 시점의 level 이 그대로 남아
+        // 있으니 재시작하면 맞는다. /op 는 언제나 op-permission-level 로 주므로, 이 차이는
+        // ops.json 을 손으로 고친 서버에서만 생긴다.
+        UserLists.Diff<UUID> diff = UserLists.diff(live, names.keySet());
         if (diff.isEmpty()) {
             log.info("[복원] op 목록은 이미 백업 시점과 같습니다. (" + live.size() + "명)");
             return;
@@ -100,13 +117,13 @@ public final class UserListSync {
         byte[] original = snapshot(file, log);
         try {
             for (UUID uuid : diff.add()) {
-                Bukkit.getOfflinePlayer(uuid).setOp(true);
+                roster.setOp(uuid, true);
                 log.warning("[복원] op 부여: " + label(names.get(uuid), uuid));
             }
             for (UUID uuid : diff.remove()) {
-                OfflinePlayer player = live.get(uuid);
-                player.setOp(false);
-                log.warning("[복원] op 해제: " + label(player.getName(), uuid));
+                String name = roster.nameOf(uuid); // 빼고 나면 못 물어볼 수 있다
+                roster.setOp(uuid, false);
+                log.warning("[복원] op 해제: " + label(name, uuid));
             }
         } finally {
             rewrite(file, original, log);
@@ -122,7 +139,7 @@ public final class UserListSync {
     // ------------------------------------------------------------------
     // 화이트리스트
 
-    private static void syncWhitelist(Path serverRoot, Logger log) {
+    private static void syncWhitelist(Path serverRoot, Logger log, Roster roster) {
         Path file = serverRoot.resolve(UserLists.WHITELIST);
         List<UserLists.Member> wanted;
         try {
@@ -136,16 +153,16 @@ public final class UserListSync {
         // 서버가 스스로 다시 읽게 해 본다. 이 길로 되면 이름까지 파일 그대로 남아
         // 아래 되쓰기가 필요 없어진다. (op 에는 이런 API 가 없다)
         try {
-            Bukkit.reloadWhitelist();
+            roster.reloadWhitelist();
         } catch (Throwable ignored) {
             // 구현이 없는 포크일 수 있다. 아래에서 어차피 직접 맞춘다.
         }
 
-        Map<UUID, OfflinePlayer> live = byUuid(Bukkit.getWhitelistedPlayers());
+        Set<UUID> live = roster.whitelisted();
         Map<UUID, String> names = new LinkedHashMap<>();
         for (UserLists.Member member : wanted) names.put(member.uuid(), member.name());
 
-        UserLists.Diff<UUID> diff = UserLists.diff(live.keySet(), names.keySet());
+        UserLists.Diff<UUID> diff = UserLists.diff(live, names.keySet());
         if (diff.isEmpty()) {
             // 위 reloadWhitelist 가 먹혔거나, 애초에 달라진 것이 없었다. 어느 쪽이든 지금
             // 서버가 들고 있는 것이 백업 시점 그대로다.
@@ -156,10 +173,10 @@ public final class UserListSync {
         byte[] original = snapshot(file, log);
         try {
             for (UUID uuid : diff.add()) {
-                Bukkit.getOfflinePlayer(uuid).setWhitelisted(true);
+                roster.setWhitelisted(uuid, true);
             }
             for (UUID uuid : diff.remove()) {
-                live.get(uuid).setWhitelisted(false);
+                roster.setWhitelisted(uuid, false);
             }
         } finally {
             rewrite(file, original, log);
@@ -219,12 +236,89 @@ public final class UserListSync {
         }
     }
 
-    private static Map<UUID, OfflinePlayer> byUuid(Collection<OfflinePlayer> players) {
-        Map<UUID, OfflinePlayer> map = new LinkedHashMap<>();
-        for (OfflinePlayer player : players) {
-            if (player != null && player.getUniqueId() != null) map.put(player.getUniqueId(), player);
+    /**
+     * 살아 있는 서버의 명단. Bukkit 타입이 이 선 밖으로 새지 않는다.
+     *
+     * <p>{@code UUID} 와 이름만 오간다. 그래서 테스트가 서버 없이 가짜 명단 하나로 이 클래스
+     * 전체를 돌려 볼 수 있다 - 파일을 되돌린 뒤 <b>메모리까지 맞춰지는지</b>가 이 플러그인이
+     * 고치려던 사고 그 자체라, 말로만 두면 안 되는 부분이다.</p>
+     */
+    public interface Roster {
+
+        /** 지금 op 인 사람들. */
+        Set<UUID> operators();
+
+        /** 지금 화이트리스트에 있는 사람들. */
+        Set<UUID> whitelisted();
+
+        void setOp(UUID uuid, boolean value);
+
+        void setWhitelisted(UUID uuid, boolean value);
+
+        /** 서버가 {@code whitelist.json} 을 스스로 다시 읽게 한다. 없는 구현이면 던져도 된다. */
+        void reloadWhitelist();
+
+        /** 기록에 쓸 이름. 모르면 {@code null} - 그러면 UUID 로 적는다. */
+        String nameOf(UUID uuid);
+    }
+
+    /**
+     * 진짜 서버에 붙는 구현.
+     *
+     * <p>{@link Bukkit#getOperators()} 는 부를 때마다 새로 만들어지는 목록이라, 이름을 물어볼
+     * 때 쓰려고 한 번 부른 것을 붙들어 둔다. op 를 빼고 나면 그 사람은 더 이상 목록에 없어서
+     * 나중에는 이름을 물어볼 수 없다.</p>
+     */
+    private static final class BukkitRoster implements Roster {
+
+        private final Map<UUID, OfflinePlayer> known = new LinkedHashMap<>();
+
+        @Override
+        public Set<UUID> operators() {
+            return remember(Bukkit.getOperators());
         }
-        return map;
+
+        @Override
+        public Set<UUID> whitelisted() {
+            return remember(Bukkit.getWhitelistedPlayers());
+        }
+
+        @Override
+        public void setOp(UUID uuid, boolean value) {
+            player(uuid).setOp(value);
+        }
+
+        @Override
+        public void setWhitelisted(UUID uuid, boolean value) {
+            player(uuid).setWhitelisted(value);
+        }
+
+        @Override
+        public void reloadWhitelist() {
+            Bukkit.reloadWhitelist();
+        }
+
+        @Override
+        public String nameOf(UUID uuid) {
+            OfflinePlayer player = known.get(uuid);
+            return player == null ? null : player.getName();
+        }
+
+        private Set<UUID> remember(Collection<OfflinePlayer> players) {
+            Set<UUID> ids = new LinkedHashSet<>();
+            for (OfflinePlayer player : players) {
+                if (player == null || player.getUniqueId() == null) continue;
+                known.put(player.getUniqueId(), player);
+                ids.add(player.getUniqueId());
+            }
+            return ids;
+        }
+
+        /** 접속한 적 없는 UUID 여도 된다. {@code UUID} 로 부르는 쪽은 조회를 밖으로 내보내지 않는다. */
+        private OfflinePlayer player(UUID uuid) {
+            OfflinePlayer known = this.known.get(uuid);
+            return known != null ? known : Bukkit.getOfflinePlayer(uuid);
+        }
     }
 
     private static String label(String name, UUID uuid) {
